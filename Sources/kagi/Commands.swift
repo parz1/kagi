@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import KagiCore
+import SystemConfiguration
 
 /// 指纹框里的说明。系统会在前面加上「kagi is trying to」，所以动词放在最前面。
 enum Reason {
@@ -46,6 +47,11 @@ enum Commands {
       }
     #endif
     return .standard()
+  }
+
+  /// 「系统设置 › 通用 › 共享」里的电脑名。不用 Host.current()，它可能做网络解析，卡好几秒。
+  static func computerName() -> String {
+    (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
   }
 
   static func useLog() -> UseLog {
@@ -106,7 +112,7 @@ enum Commands {
     Term.print("等待指纹确认…", .dim)
 
     let pending = try Kagi.prepareInit(
-      at: root, deviceName: Host.current().localizedName ?? "Mac", backend: backend(),
+      at: root, deviceName: computerName(), backend: backend(),
       reason: { "确认这台 Mac 能用指纹解锁 kagi（新建库 \($0)）" })
     let short = Kagi.shortID(pending.vault.vault)
     Term.print("已创建这台 Mac 的设备密钥 \(pending.device.device)（在 Secure Enclave 里）", .ok)
@@ -512,7 +518,7 @@ enum Commands {
     Term.print("等待指纹确认…", .dim)
     let others = try store.devices()
     let (joined, device) = try Kagi.recover(
-      at: root, recoveryKey: recoveryKey, deviceName: Host.current().localizedName ?? "Mac", backend: backend(),
+      at: root, recoveryKey: recoveryKey, deviceName: computerName(), backend: backend(),
       local: local, reason: { "让这台 Mac 加入库 \($0)" })
     useLog().append(
       UseRecord(
