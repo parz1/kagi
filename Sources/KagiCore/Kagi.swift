@@ -52,17 +52,21 @@ public enum Kagi {
     let recovery = RecoveryFile(
       format: Format.recovery, vault: vaultID,
       secretWrap: try Crypto.seal(
-        Crypto.keyData(secretKey), key: kek, binding: Binding.recovery(vault: vaultID, purpose: .secret)),
+        Crypto.keyData(secretKey), key: kek,
+        binding: Binding.recovery(vault: vaultID, purpose: .secret)),
       indexWrap: try Crypto.seal(
-        Crypto.keyData(indexKey), key: kek, binding: Binding.recovery(vault: vaultID, purpose: .index)))
+        Crypto.keyData(indexKey), key: kek,
+        binding: Binding.recovery(vault: vaultID, purpose: .index)))
 
     return PendingVault(
-      store: store, vault: vault, device: device, recovery: recovery, state: state, recoveryKey: recoveryKey)
+      store: store, vault: vault, device: device, recovery: recovery, state: state,
+      recoveryKey: recoveryKey)
   }
 
   /// 用恢复密钥让这台 Mac 加入已有的库。会弹指纹框确认新的设备密钥能用。
   public static func recover(
-    at root: URL, recoveryKey: RecoveryKey, deviceName: String, backend: KeyBackend, local: LocalStore,
+    at root: URL, recoveryKey: RecoveryKey, deviceName: String, backend: KeyBackend,
+    local: LocalStore,
     reason: (String) -> String
   ) throws -> (vault: VaultFile, device: DeviceFile) {
     let store = VaultStore(root: root)
@@ -77,10 +81,12 @@ public enum Kagi {
     do {
       secretKey = SymmetricKey(
         data: try Crypto.open(
-          recovery.secretWrap, key: kek, binding: Binding.recovery(vault: vault.vault, purpose: .secret)))
+          recovery.secretWrap, key: kek,
+          binding: Binding.recovery(vault: vault.vault, purpose: .secret)))
       indexKey = SymmetricKey(
         data: try Crypto.open(
-          recovery.indexWrap, key: kek, binding: Binding.recovery(vault: vault.vault, purpose: .index)))
+          recovery.indexWrap, key: kek,
+          binding: Binding.recovery(vault: vault.vault, purpose: .index)))
     } catch {
       throw KagiError(
         .dataError, "这把恢复密钥解不开这个库。", hint: "它可能属于别的库。请确认库的位置和恢复密钥是一对。")
@@ -100,7 +106,8 @@ public enum Kagi {
 
   /// 为这台 Mac 新建两把设备密钥，把库内密钥包给它们，再用要求指纹的那把试解一次。
   static func enroll(
-    vault: VaultFile, root: URL, secretKey: SymmetricKey, indexKey: SymmetricKey, deviceName: String,
+    vault: VaultFile, root: URL, secretKey: SymmetricKey, indexKey: SymmetricKey,
+    deviceName: String,
     backend: KeyBackend, reason: String
   ) throws -> (DeviceFile, DeviceState) {
     guard backend.isAvailable else {
@@ -118,11 +125,14 @@ public enum Kagi {
     let secretBinding = Binding.device(vault: vault.vault, device: deviceID, purpose: .secret)
     let indexBinding = Binding.device(vault: vault.vault, device: deviceID, purpose: .index)
     let device = DeviceFile(
-      format: Format.device, vault: vault.vault, device: deviceID, name: deviceName, created: Timestamp.now(),
+      format: Format.device, vault: vault.vault, device: deviceID, name: deviceName,
+      created: Timestamp.now(),
       secretPublicKey: Crypto.publicKeyText(secretPair.publicKey),
       indexPublicKey: Crypto.publicKeyText(indexPair.publicKey),
-      secretWrap: try Crypto.hpkeSeal(Crypto.keyData(secretKey), to: secretPair.publicKey, binding: secretBinding),
-      indexWrap: try Crypto.hpkeSeal(Crypto.keyData(indexKey), to: indexPair.publicKey, binding: indexBinding))
+      secretWrap: try Crypto.hpkeSeal(
+        Crypto.keyData(secretKey), to: secretPair.publicKey, binding: secretBinding),
+      indexWrap: try Crypto.hpkeSeal(
+        Crypto.keyData(indexKey), to: indexPair.publicKey, binding: indexBinding))
 
     // 试解一次：确认指纹能用，也确认包装没问题。
     let check: Data
@@ -138,9 +148,11 @@ public enum Kagi {
     }
 
     let state = DeviceState(
-      format: Format.local, vaultPath: root.path, vault: vault.vault, device: deviceID, created: device.created,
+      format: Format.local, vaultPath: root.path, vault: vault.vault, device: deviceID,
+      created: device.created,
       keyCheck: vault.keyCheck, indexKeyCheck: vault.indexKeyCheck,
-      secretKeyBlob: secretPair.blob.base64EncodedString(), indexKeyBlob: indexPair.blob.base64EncodedString())
+      secretKeyBlob: secretPair.blob.base64EncodedString(),
+      indexKeyBlob: indexPair.blob.base64EncodedString())
     return (device, state)
   }
 
@@ -239,20 +251,39 @@ public final class Session {
 
   /// 所有条目的名字和元数据，按引用排序。解不开的条目抛错，不悄悄跳过。
   public func listings() throws -> [Listing] {
+    try checkedListings(validateEntries: true)
+  }
+
+  private func checkedListings(validateEntries: Bool) throws -> [Listing] {
     let key = try indexKey()
-    return try store.indexFiles().map { file -> Listing in
+    let result = try store.indexFiles().map { file -> Listing in
       guard file.vault == vault.vault else {
         throw KagiError(.dataError, "index/\(file.entry).kagi 不属于这个库。")
       }
       let plain: Data
       do {
-        plain = try Crypto.open(file.box, key: key, binding: Binding.index(vault: vault.vault, entry: file.entry))
+        plain = try Crypto.open(
+          file.box, key: key, binding: Binding.index(vault: vault.vault, entry: file.entry))
       } catch {
         throw KagiError(.dataError, "index/\(file.entry).kagi 解不开，可能被改过。")
       }
       let record = try JSON.decode(IndexRecord.self, from: plain, file: "index/\(file.entry).kagi")
       return Listing(entry: file.entry, record: record)
     }.sorted { $0.ref < $1.ref }
+    guard Set(result.map(\.ref)).count == result.count else {
+      throw KagiError(.dataError, "库里有重复引用，可能发生了多设备冲突。请先保留冲突文件并人工核对。")
+    }
+    if validateEntries {
+      guard Set(try store.entryIDs()) == Set(result.map(\.entry)) else {
+        throw KagiError(.dataError, "条目与索引不完整，请先确认同步完成，再运行 kagi repair-index。")
+      }
+      for listing in result {
+        guard try store.versions(of: listing.entry).last == listing.record.latestVersion else {
+          throw KagiError(.dataError, "\(listing.ref) 的版本与索引不一致，请先确认同步完成，再运行 kagi repair-index。")
+        }
+      }
+    }
+    return result
   }
 
   public func find(_ ref: Ref) throws -> Listing? {
@@ -269,7 +300,8 @@ public final class Session {
     let binding = Binding.device(vault: vault.vault, device: device.device, purpose: .secret)
     let data: Data
     do {
-      data = try backend.openWithPresence(device.secretWrap, blob: blob, binding: binding, reason: reason)
+      data = try backend.openWithPresence(
+        device.secretWrap, blob: blob, binding: binding, reason: reason)
     } catch let failure as KeyFailure {
       throw Kagi.describe(failure, action: action, byAgent: byAgent)
     }
@@ -289,14 +321,16 @@ public final class Session {
     guard file.vault == vault.vault else {
       throw KagiError(.dataError, "\(listing.ref) 的文件不属于这个库。")
     }
-    let binding = Binding.entry(vault: vault.vault, entry: listing.entry, version: version, created: file.created)
+    let binding = Binding.entry(
+      vault: vault.vault, entry: listing.entry, version: version, created: file.created)
     let plainData: Data
     do {
       plainData = try Crypto.open(file.box, key: key, binding: binding)
     } catch {
       throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版解不开，可能被改过。")
     }
-    let plain = try JSON.decode(EntryPlain.self, from: plainData, file: "\(listing.ref) 第 \(version) 版")
+    let plain = try JSON.decode(
+      EntryPlain.self, from: plainData, file: "\(listing.ref) 第 \(version) 版")
     guard plain.ref == listing.ref, let value = Data(base64Encoded: plain.value) else {
       throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版里写的是别的条目，可能被调换过。")
     }
@@ -308,28 +342,89 @@ public final class Session {
   public func write(
     ref: Ref, value: Data, issuer: String?, usedIn: String?, existing: Listing?, key: SymmetricKey
   ) throws -> Int {
-    let entry = existing?.entry ?? Base32.encode(Crypto.randomBytes(10)).lowercased()
-    let latest = try store.versions(of: entry).last ?? 0
-    let version = latest + 1
-    let created = Timestamp.now()
-    let plain = try JSON.encode(EntryPlain(ref: ref.path, value: value.base64EncodedString()))
-    let file = EntryFile(
-      format: Format.entry, vault: vault.vault, entry: entry, version: version, created: created,
-      box: try Crypto.seal(
-        plain, key: key,
-        binding: Binding.entry(vault: vault.vault, entry: entry, version: version, created: created)))
-    try store.writeEntry(file)
-
-    let record = IndexRecord(
-      ref: ref.path, issuer: issuer ?? existing?.record.issuer, usedIn: usedIn ?? existing?.record.usedIn,
-      created: existing?.record.created ?? created, updated: created, latestVersion: version)
-    let indexKey = try indexKey()
-    try store.writeIndex(
-      IndexFile(
-        format: Format.index, vault: vault.vault, entry: entry,
+    return try store.withWriteLock {
+      let current = try find(ref)
+      guard current?.entry == existing?.entry, current?.record == existing?.record else {
+        throw KagiError(.tempFail, "确认期间条目已被另一个写入修改，什么都没存。请核对后重新运行。")
+      }
+      let entry = existing?.entry ?? Base32.encode(Crypto.randomBytes(10)).lowercased()
+      let latest = try store.versions(of: entry).last ?? 0
+      let version = latest + 1
+      let created = Timestamp.now()
+      let plain = try JSON.encode(EntryPlain(ref: ref.path, value: value.base64EncodedString()))
+      let file = EntryFile(
+        format: Format.entry, vault: vault.vault, entry: entry, version: version, created: created,
         box: try Crypto.seal(
-          try JSON.encode(record), key: indexKey, binding: Binding.index(vault: vault.vault, entry: entry))))
-    return version
+          plain, key: key,
+          binding: Binding.entry(
+            vault: vault.vault, entry: entry, version: version, created: created)))
+      try store.writeEntry(file)
+
+      let record = IndexRecord(
+        ref: ref.path, issuer: issuer ?? existing?.record.issuer,
+        usedIn: usedIn ?? existing?.record.usedIn,
+        created: existing?.record.created ?? created, updated: created, latestVersion: version)
+      let indexKey = try indexKey()
+      try store.writeIndex(
+        IndexFile(
+          format: Format.index, vault: vault.vault, entry: entry,
+          box: try Crypto.seal(
+            try JSON.encode(record), key: indexKey,
+            binding: Binding.index(vault: vault.vault, entry: entry))))
+      return version
+    }
+  }
+
+  /// 从通过认证的条目重建缺失或过期索引；先验证全库，再开始写入。
+  public func repairIndex(key: SymmetricKey) throws -> Int {
+    try store.withWriteLock {
+      let old = try checkedListings(validateEntries: false)
+      let oldByEntry = Dictionary(uniqueKeysWithValues: old.map { ($0.entry, $0.record) })
+      let ids = try store.entryIDs()
+      guard Set(oldByEntry.keys).isSubset(of: Set(ids)) else {
+        throw KagiError(.dataError, "索引对应的条目文件缺失。请恢复文件或等待同步，不能重建索引。")
+      }
+      var records: [(String, IndexRecord)] = []
+      var refs = Set<String>()
+      for id in ids {
+        guard let version = try store.versions(of: id).last else {
+          throw KagiError(.dataError, "条目 \(id) 没有版本文件。")
+        }
+        let file = try store.readEntry(id, version: version)
+        guard file.vault == vault.vault else { throw KeyFailure.tampered }
+        let plain = try Crypto.open(
+          file.box, key: key,
+          binding: Binding.entry(
+            vault: vault.vault, entry: id, version: version, created: file.created))
+        let value = try JSON.decode(EntryPlain.self, from: plain, file: id)
+        _ = try Ref(value.ref)
+        guard Data(base64Encoded: value.value) != nil, refs.insert(value.ref).inserted else {
+          throw KagiError(.dataError, "条目损坏或引用重复，索引没有修改。")
+        }
+        let prior = oldByEntry[id]
+        guard prior == nil || (prior!.ref == value.ref && prior!.latestVersion <= version) else {
+          throw KagiError(.dataError, "条目与旧索引不一致，可能缺少新版本。索引没有修改。")
+        }
+        records.append(
+          (
+            id,
+            IndexRecord(
+              ref: value.ref, issuer: prior?.issuer, usedIn: prior?.usedIn,
+              created: prior?.created ?? file.created, updated: file.created, latestVersion: version
+            )
+          ))
+      }
+      let index = try indexKey()
+      for (id, record) in records {
+        try store.writeIndex(
+          IndexFile(
+            format: Format.index, vault: vault.vault, entry: id,
+            box: try Crypto.seal(
+              try JSON.encode(record), key: index,
+              binding: Binding.index(vault: vault.vault, entry: id))))
+      }
+      return records.count
+    }
   }
 
   public func devices() throws -> [DeviceFile] {

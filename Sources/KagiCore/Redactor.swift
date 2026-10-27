@@ -15,10 +15,10 @@ public final class Redactor: @unchecked Sendable {
   var pending: [UInt8] = []
   let lock = NSLock()
 
-  public init(values: [(ref: String, value: Data)]) {
+  public init(values: [(ref: String, value: Data)], minimumLength: Int = Redactor.minimumLength) {
     secrets =
       values
-      .filter { $0.value.count >= Self.minimumLength }
+      .filter { !$0.value.isEmpty && $0.value.count >= minimumLength }
       .map { Secret(bytes: Array($0.value), replacement: Array("‹kagi:\($0.ref)›".utf8)) }
       .sorted { $0.bytes.count > $1.bytes.count }
   }

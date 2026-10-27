@@ -39,10 +39,14 @@ func string(_ object: [String: Any], _ key: String, _ file: String) -> String {
 
 // 1. 库 ID 和恢复密钥包装。
 let vaultFile = readJSON(vaultDir.appendingPathComponent("vault.json"))
-guard string(vaultFile, "format", "vault.json") == "kagi-vault/1" else { fail("vault.json 的格式版本不认得") }
+guard string(vaultFile, "format", "vault.json") == "kagi-vault/1" else {
+  fail("vault.json 的格式版本不认得")
+}
 let vaultID = string(vaultFile, "vault", "vault.json")
 let recoveryFile = readJSON(vaultDir.appendingPathComponent("keys/recovery.json"))
-guard string(recoveryFile, "vault", "keys/recovery.json") == vaultID else { fail("keys/recovery.json 不属于这个库") }
+guard string(recoveryFile, "vault", "keys/recovery.json") == vaultID else {
+  fail("keys/recovery.json 不属于这个库")
+}
 
 // 2. 读恢复密钥并解码：Crockford Base32，忽略大小写、横线、空格；O 当 0，I 和 L 当 1。
 var buffer = [CChar](repeating: 0, count: 512)
@@ -82,7 +86,9 @@ let kek = HKDF<SHA256>.deriveKey(
   outputByteCount: 32)
 
 func open(_ base64: String, _ key: SymmetricKey, _ binding: String) -> Data? {
-  guard let combined = Data(base64Encoded: base64), let box = try? AES.GCM.SealedBox(combined: combined) else {
+  guard let combined = Data(base64Encoded: base64),
+    let box = try? AES.GCM.SealedBox(combined: combined)
+  else {
     return nil
   }
   return try? AES.GCM.open(box, using: key, authenticating: Data(binding.utf8))
@@ -90,27 +96,43 @@ func open(_ base64: String, _ key: SymmetricKey, _ binding: String) -> Data? {
 
 guard
   let vaultKeyData = open(
-    string(recoveryFile, "secretWrap", "keys/recovery.json"), kek, "kagi-recovery/1|\(vaultID)|secret")
+    string(recoveryFile, "secretWrap", "keys/recovery.json"), kek,
+    "kagi-recovery/1|\(vaultID)|secret")
 else { fail("这把恢复密钥解不开这个库") }
 let vaultKey = SymmetricKey(data: vaultKeyData)
 
 // 4. 每个条目取版本号最大的文件解密。
 let fm = FileManager.default
-if fm.fileExists(atPath: outDir.path), !((try? fm.contentsOfDirectory(atPath: outDir.path)) ?? []).isEmpty {
+if fm.fileExists(atPath: outDir.path),
+  !((try? fm.contentsOfDirectory(atPath: outDir.path)) ?? []).isEmpty
+{
   fail("\(outDir.path) 已经存在而且不是空的，换一个输出位置")
 }
-try fm.createDirectory(at: outDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 
 let entriesDir = vaultDir.appendingPathComponent("entries", isDirectory: true)
-let entryIDs = ((try? fm.contentsOfDirectory(atPath: entriesDir.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
-var written: [String] = []
+guard let entryNames = try? fm.contentsOfDirectory(atPath: entriesDir.path) else {
+  fail("读不了 entries 目录")
+}
+let entryIDs = entryNames.filter { !$0.hasPrefix(".") }.sorted()
+var exports: [(path: String, ref: String, value: Data)] = []
 for entryID in entryIDs {
+  guard entryID.count == 16, entryID.allSatisfy({ "0123456789abcdefghjkmnpqrstvwxyz".contains($0) })
+  else {
+    fail("条目 ID 不合法：\(entryID)")
+  }
   let dir = entriesDir.appendingPathComponent(entryID, isDirectory: true)
-  let versions = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
-    .filter { $0.hasSuffix(".kagi") }
-    .compactMap { Int($0.dropLast(5)) }
-  guard let version = versions.max() else { continue }
-  let name = String(format: "%04d.kagi", version)
+  guard let files = try? fm.contentsOfDirectory(atPath: dir.path) else {
+    fail("读不了条目目录：\(entryID)")
+  }
+  var versions: [Int] = []
+  for file in files where file.hasSuffix(".kagi") && !file.hasPrefix(".") {
+    guard let version = Int(file.dropLast(5)), version > 0,
+      file == String(format: "%04ld.kagi", version)
+    else { fail("版本文件冲突或异常：\(entryID)/\(file)") }
+    versions.append(version)
+  }
+  guard let version = versions.max() else { fail("条目没有版本：\(entryID)") }
+  let name = String(format: "%04ld.kagi", version)
   let file = readJSON(dir.appendingPathComponent(name))
   guard string(file, "vault", name) == vaultID, string(file, "entry", name) == entryID,
     (file["version"] as? Int) == version
@@ -118,27 +140,51 @@ for entryID in entryIDs {
   let created = string(file, "created", name)
   guard
     let plain = open(
-      string(file, "box", name), vaultKey, "kagi-entry/1|\(vaultID)|\(entryID)|\(version)|\(created)"),
+      string(file, "box", name), vaultKey,
+      "kagi-entry/1|\(vaultID)|\(entryID)|\(version)|\(created)"),
     let object = try? JSONSerialization.jsonObject(with: plain) as? [String: Any],
     let ref = object["ref"] as? String, let valueText = object["value"] as? String,
     let value = Data(base64Encoded: valueText)
   else { fail("entries/\(entryID)/\(name) 解不开，可能被改过") }
 
-  // 引用只含小写字母、数字、. _ - 和 /；再检查一遍，免得写出输出文件夹。
-  guard !ref.isEmpty, !ref.split(separator: "/").contains(where: { $0.isEmpty || $0.hasPrefix(".") }),
-    ref.allSatisfy({ $0.isASCII && ($0.isLowercase || $0.isNumber || "._-/".contains($0)) })
-  else { fail("entries/\(entryID)/\(name) 里的引用名不对：\(ref)") }
-  let relative = ref.split(separator: "/").last!.contains(".") ? ref : ref + ".txt"
-  let target = outDir.appendingPathComponent(relative)
-  try fm.createDirectory(
-    at: target.deletingLastPathComponent(), withIntermediateDirectories: true,
-    attributes: [.posixPermissions: 0o700])
-  guard fm.createFile(atPath: target.path, contents: value, attributes: [.posixPermissions: 0o600]) else {
-    fail("写不了 \(target.path)")
-  }
-  written.append(relative)
+  let segments = ref.split(separator: "/", omittingEmptySubsequences: false)
+  guard !ref.isEmpty, ref.count <= 200,
+    segments.allSatisfy({ segment in
+      guard let first = segment.first, segment.count <= 64,
+        first.isASCII && (first.isLowercase || first.isNumber)
+      else { return false }
+      return segment.allSatisfy {
+        $0.isASCII && ($0.isLowercase || $0.isNumber || "._-".contains($0))
+      }
+    })
+  else { fail("条目引用名不合法：\(entryID)") }
+  // 每个条目独立目录，避免 foo 与 foo.txt、大小写和目录前缀导致的覆盖。
+  let outputName = String(segments.last!)
+  exports.append((entryID + "/" + outputName, ref, value))
 }
 
-print("解出 \(written.count) 条，写到 \(outDir.path)/（权限 0700）：")
-written.forEach { print("  \($0)") }
+// 所有条目验证完毕才写明文。目标文件绝不覆盖。
+try fm.createDirectory(
+  at: outDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: outDir.path)
+for item in exports {
+  let target = outDir.appendingPathComponent(item.path)
+  try fm.createDirectory(
+    at: target.deletingLastPathComponent(), withIntermediateDirectories: false,
+    attributes: [.posixPermissions: 0o700])
+  let fd = open(target.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+  guard fd >= 0 else { fail("无法排他创建恢复文件：\(item.path)") }
+  let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+  try handle.write(contentsOf: item.value)
+  try handle.close()
+}
+let manifest = exports.map { ["ref": $0.ref, "file": $0.path] }
+let manifestData = try JSONSerialization.data(
+  withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+try manifestData.write(
+  to: outDir.appendingPathComponent("manifest.json"), options: .withoutOverwriting)
+try fm.setAttributes(
+  [.posixPermissions: 0o600], ofItemAtPath: outDir.appendingPathComponent("manifest.json").path)
+print("解出 \(exports.count) 条，写到 \(outDir.path)/（权限 0700）：")
+exports.forEach { print("  \($0.ref) → \($0.path)") }
 print("这些是明文文件，用完请删除：rm -r \(outDir.path)")

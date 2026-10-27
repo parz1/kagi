@@ -11,13 +11,22 @@ enum Reason {
     initiator.label + (initiator.label.last?.isASCII == true ? " 发起" : "发起")
   }
 
-  static func run(refs: [String], command: String, initiator: Initiator) -> String {
-    let shown = Term.truncate(command, to: commandWidth)
-    let tail = shown == command ? "" : "；完整命令见 kagi log"
-    return "把 \(refs.joined(separator: "、")) 交给命令「\(shown)」（\(by(initiator))\(tail)）"
+  static func run(injections: [String], command: String, directory: String, initiator: Initiator)
+    throws -> String
+  {
+    let reason =
+      "交给命令「\(command)」；目录「\(directory)」；\(injections.joined(separator: "、"))（\(by(initiator))）"
+    guard Term.displayWidth(reason) <= 500,
+      !reason.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    else {
+      throw KagiError(.usage, "授权说明太长或包含控制字符，命令没有运行。请减少本次请求的条目或缩短命令。")
+    }
+    return reason
   }
 
-  static func set(ref: String, overwriting version: Int?, fromStdin: Bool, initiator: Initiator) -> String {
+  static func set(ref: String, overwriting version: Int?, fromStdin: Bool, initiator: Initiator)
+    -> String
+  {
     let what = fromStdin ? "把标准输入存为 \(ref)" : "存入 \(ref)"
     if let version {
       let verb = fromStdin ? "把标准输入存为 \(ref)，覆盖旧值" : "覆盖 \(ref)"
@@ -30,11 +39,22 @@ enum Reason {
 enum Commands {
   // MARK: 环境
 
-  static func backend() -> KeyBackend {
+  static func backend() throws -> KeyBackend {
     #if DEBUG
       if ProcessInfo.processInfo.environment["KAGI_DEBUG_SOFTWARE_KEYS"] == "1" {
-        Term.say("（调试版：用软件密钥，不弹指纹框）", .warn)
-        return SoftwareBackend()
+        let name = ProcessInfo.processInfo.environment["KAGI_DEBUG_AUTH_DECISION"] ?? "approve"
+        let decision: SoftwareBackend.Decision
+        switch name {
+        case "approve": decision = .approve
+        case "deny": decision = .deny
+        case "locked": decision = .locked
+        default:
+          throw KagiError(.usage, "KAGI_DEBUG_AUTH_DECISION 只能是 approve、deny 或 locked。")
+        }
+        Term.say("（调试版：软件密钥，模拟验证结果：\(name)，不弹真实指纹框）", .warn)
+        return SoftwareBackend(decision: decision) { reason in
+          Term.say("模拟授权说明：\(reason)", .dim)
+        }
       }
     #endif
     return SecureEnclaveBackend()
@@ -153,7 +173,8 @@ enum Commands {
     try pending.commit(local: local)
     useLog().append(
       UseRecord(
-        action: "init", refs: [], command: nil, fullCommand: nil, initiator: initiator, result: "approved"))
+        action: "init", refs: [], command: nil, fullCommand: nil, initiator: initiator,
+        result: "approved"))
     Term.print("")
     Term.print("完成。库 \(short) 已建好。下一步：", .ok)
     Term.print("  kagi set <引用>     存一条密钥，比如 kagi set resend/api-key")
@@ -172,7 +193,9 @@ enum Commands {
       let pending = try Kagi.prepareInit(
         at: try vaultRoot(vaultOption), deviceName: "调试", backend: backend(), reason: { $0 })
       try pending.commit(local: localStore())
-      Term.print("调试库 \(Kagi.shortID(pending.vault.vault)) 已建好。恢复密钥（调试库，假的）：\(pending.recoveryKey.displayText)")
+      Term.print(
+        "调试库 \(Kagi.shortID(pending.vault.vault)) 已建好。恢复密钥（调试库，假的）：\(pending.recoveryKey.displayText)"
+      )
     }
   #endif
 
@@ -219,7 +242,8 @@ enum Commands {
       }
       // 终端输入有长度上限，超长的会被截断；长的、多行的值从标准输入传。
       guard typed.utf8.count < Term.inputLimit - 1 else {
-        throw KagiError(.usage, "值太长，终端输入放不下，什么都没存。", hint: "从管道或文件传进来：kagi set \(ref) --stdin < 文件")
+        throw KagiError(
+          .usage, "值太长，终端输入放不下，什么都没存。", hint: "从管道或文件传进来：kagi set \(ref) --stdin < 文件")
       }
       value = Data(typed.utf8)
     }
@@ -232,17 +256,21 @@ enum Commands {
       Term.say("注意：这个值直接写在了命令行里，会留在 shell 历史和 agent 的记录里。下次让它从文件或上一个命令的输出流进来。", .warn)
     }
 
+    let auditRedactor = Redactor(values: [(ref.path, value)], minimumLength: 1)
     Term.say("等待指纹确认…", .dim)
     let reason = Reason.set(
-      ref: ref.path, overwriting: existing?.record.latestVersion, fromStdin: fromStdin, initiator: initiator)
+      ref: ref.path, overwriting: existing?.record.latestVersion, fromStdin: fromStdin,
+      initiator: initiator)
     let key: SymmetricKey
     do {
       key = try session.unlock(reason: reason, action: .write, byAgent: initiator.isAgent)
     } catch let error as KagiError {
       useLog().append(
         UseRecord(
-          action: "set", refs: [ref.path], command: nil, fullCommand: initiator.shellCommand,
-          initiator: initiator, result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error"))
+          action: "set", refs: [ref.path], command: nil,
+          fullCommand: initiator.shellCommand.map(auditRedactor.redact),
+          initiator: initiator,
+          result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error"))
       throw error
     }
     let version = try session.write(
@@ -250,7 +278,7 @@ enum Commands {
     useLog().append(
       UseRecord(
         action: "set", refs: [ref.path], command: nil,
-        fullCommand: initiator.shellCommand.map { Redactor(values: [(ref.path, value)]).redact($0) },
+        fullCommand: initiator.shellCommand.map(auditRedactor.redact),
         initiator: initiator, result: "approved"))
     Term.say("已存入 \(ref)（第 \(version) 版）", .ok)
     if version > 1 {
@@ -266,7 +294,7 @@ enum Commands {
         .usage, "用法：kagi run --env 变量名=<引用> [--stdin <引用>] -- <命令> [参数...]",
         hint: "-- 后面是要运行的命令。")
     }
-    let command = Array(args[(separator + 1)...])
+    var command = Array(args[(separator + 1)...])
     guard !command.isEmpty else {
       throw KagiError(.usage, "-- 后面要写要运行的命令。")
     }
@@ -284,8 +312,16 @@ enum Commands {
       throw KagiError(.usage, "至少要用 --env 或 --stdin 交出一条值。")
     }
 
+    command[0] = try Runner.resolveExecutable(command[0])
     let initiator = Initiator.current()
     let commandText = Term.commandLine(command)
+    guard Term.displayWidth(commandText) <= Reason.commandWidth,
+      !commandText.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    else {
+      throw KagiError(
+        .usage, "命令太长或包含控制字符，无法完整用于授权，命令没有运行。",
+        hint: "请缩短命令；如使用脚本，请先由用户检查脚本内容。kagi 不验证脚本内容。")
+    }
     var refs: [String] = []
     for ref in envRefs.map(\.ref) + (stdinRef.map { [$0] } ?? []) where !refs.contains(ref.path) {
       refs.append(ref.path)
@@ -305,8 +341,13 @@ enum Commands {
       resolved[ref] = listing
     }
 
+    let injections =
+      envRefs.map { "\($0.name)=\($0.ref.path)" }
+      + (stdinRef.map { ["stdin=\($0.path)"] } ?? [])
+    let reason = try Reason.run(
+      injections: injections, command: commandText,
+      directory: FileManager.default.currentDirectoryPath, initiator: initiator)
     Term.say("等待指纹确认…", .dim)
-    let reason = Reason.run(refs: refs, command: commandText, initiator: initiator)
     let key: SymmetricKey
     do {
       key = try session.unlock(reason: reason, action: .read, byAgent: initiator.isAgent)
@@ -314,7 +355,8 @@ enum Commands {
       useLog().append(
         UseRecord(
           action: "run", refs: refs, command: commandText, fullCommand: initiator.shellCommand,
-          initiator: initiator, result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error",
+          initiator: initiator,
+          result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error",
           exitCode: error.code.rawValue))
       throw error
     }
@@ -343,21 +385,26 @@ enum Commands {
       useLog().append(
         UseRecord(
           action: "run", refs: refs, command: commandText,
-          fullCommand: initiator.shellCommand.map(redactor.redact), initiator: initiator, result: "error",
+          fullCommand: initiator.shellCommand.map(redactor.redact), initiator: initiator,
+          result: "error",
           exitCode: error.code.rawValue))
       throw error
     }
     useLog().append(
       UseRecord(
-        action: "run", refs: refs, command: commandText, fullCommand: initiator.shellCommand.map(redactor.redact),
+        action: "run", refs: refs, command: commandText,
+        fullCommand: initiator.shellCommand.map(redactor.redact),
         initiator: initiator, result: "approved", exitCode: code))
     return code
   }
 
   static func isValidEnvName(_ name: String) -> Bool {
-    guard let first = name.unicodeScalars.first, first == "_" || (first.isASCII && CharacterSet.letters.contains(first))
+    guard let first = name.unicodeScalars.first,
+      first == "_" || (first.isASCII && CharacterSet.letters.contains(first))
     else { return false }
-    return name.unicodeScalars.allSatisfy { $0.isASCII && ($0 == "_" || CharacterSet.alphanumerics.contains($0)) }
+    return name.unicodeScalars.allSatisfy {
+      $0.isASCII && ($0 == "_" || CharacterSet.alphanumerics.contains($0))
+    }
   }
 
   static func notFound(_ ref: String, among refs: [String]) -> KagiError {
@@ -404,8 +451,12 @@ enum Commands {
     Term.print(
       "  更新      \(Term.shortTime(item.record.updated))（第 \(versions.last ?? item.record.latestVersion) 版，共 \(versions.count) 版）"
     )
-    if let last = useLog().read().last(where: { $0.refs.contains(ref.path) && $0.result == "approved" && $0.action == "run" }) {
-      Term.print("  最近使用  \(Term.shortTime(last.time)) · \(last.initiator) · \(Term.truncate(last.command ?? "", to: 48))")
+    if let last = useLog().read().last(where: {
+      $0.refs.contains(ref.path) && $0.result == "approved" && $0.action == "run"
+    }) {
+      Term.print(
+        "  最近使用  \(Term.shortTime(last.time)) · \(last.initiator) · \(Term.truncate(last.command ?? "", to: 48))"
+      )
     }
     Term.print("值不会显示。要把它交给命令，用 kagi run。", .dim)
   }
@@ -415,10 +466,11 @@ enum Commands {
   static func log(_ args: [String]) throws {
     var parser = ArgParser(args)
     let full = parser.flag("--full")
-    let count = try parser.value(for: "-n").map { text -> Int in
-      guard let n = Int(text), n > 0 else { throw KagiError(.usage, "-n 后面要写正整数。") }
-      return n
-    } ?? 20
+    let count =
+      try parser.value(for: "-n").map { text -> Int in
+        guard let n = Int(text), n > 0 else { throw KagiError(.usage, "-n 后面要写正整数。") }
+        return n
+      } ?? 20
     try parser.finish()
     let records = Array(useLog().read().suffix(count))
     guard !records.isEmpty else {
@@ -428,7 +480,8 @@ enum Commands {
     if full {
       for record in records {
         Term.print(
-          "\(Term.longTime(record.time))  \(resultLabel(record.result))  \(record.refs.joined(separator: "、"))", .bold)
+          "\(Term.longTime(record.time))  \(resultLabel(record.result))  \(record.refs.joined(separator: "、"))",
+          .bold)
         Term.print("  动作      \(actionLabel(record.action))")
         if let command = record.command { Term.print("  命令      \(command)") }
         if let fullCommand = record.fullCommand { Term.print("  整条命令  \(fullCommand)") }
@@ -482,6 +535,22 @@ enum Commands {
     rows.forEach { Term.print(line($0)) }
   }
 
+  static func repairIndex(_ args: [String]) throws {
+    var parser = ArgParser(args)
+    try parser.finish()
+    let initiator = Initiator.current()
+    let session = try Session(local: localStore(), backend: backend())
+    let key = try session.unlock(
+      reason: "解密库 \(session.shortID) 的全部条目并重建索引（\(Reason.by(initiator))）",
+      action: .write, byAgent: initiator.isAgent)
+    let count = try session.repairIndex(key: key)
+    useLog().append(
+      UseRecord(
+        action: "repair-index", refs: [], command: nil, fullCommand: nil,
+        initiator: initiator, result: "approved"))
+    Term.say("已重建 \(count) 条索引。缺失索引的签发方和用途无法恢复，请按需补填。", .ok)
+  }
+
   // MARK: recover
 
   static func recover(_ args: [String]) throws {
@@ -522,7 +591,8 @@ enum Commands {
       local: local, reason: { "让这台 Mac 加入库 \($0)" })
     useLog().append(
       UseRecord(
-        action: "recover", refs: [], command: nil, fullCommand: nil, initiator: initiator, result: "approved"))
+        action: "recover", refs: [], command: nil, fullCommand: nil, initiator: initiator,
+        result: "approved"))
     Term.print("恢复密钥正确。这台 Mac 已加入库 \(Kagi.shortID(joined.vault))（设备 \(device.device)）。", .ok)
     if !others.isEmpty {
       Term.print("库里还有这些设备：")

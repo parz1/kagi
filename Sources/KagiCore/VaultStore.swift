@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 库文件夹的读写。只管文件，不碰密钥。
@@ -87,8 +88,12 @@ public struct VaultStore: Sendable {
 
   public func versions(of entry: String) throws -> [Int] {
     try files(in: entriesDir.appendingPathComponent(entry, isDirectory: true), suffix: ".kagi")
-      .compactMap { Int($0.deletingPathExtension().lastPathComponent) }
-      .sorted()
+      .map { url in
+        guard let version = Int(url.deletingPathExtension().lastPathComponent), version > 0,
+          url.lastPathComponent == Self.versionName(version), version < Int.max
+        else { throw KagiError(.dataError, "发现版本冲突或异常文件：\(url.lastPathComponent)。请先检查网盘同步。") }
+        return version
+      }.sorted()
   }
 
   public func readEntry(_ entry: String, version: Int) throws -> EntryFile {
@@ -105,10 +110,17 @@ public struct VaultStore: Sendable {
     let dir = entriesDir.appendingPathComponent(file.entry, isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = entryURL(file.entry, file.version)
-    guard !FileManager.default.fileExists(atPath: url.path) else {
-      throw KagiError(.software, "entries/\(file.entry)/\(Self.versionName(file.version)) 已经存在。")
+    // 先完整写入临时文件，再排他重命名发布；目标存在时绝不替换。
+    let temporary = dir.appendingPathComponent(".pending-" + UUID().uuidString)
+    defer {
+      try? FileManager.default.removeItem(at: temporary)
+      // 失败时不留下没有任何版本的新条目目录；非空目录不会被删除。
+      _ = rmdir(dir.path)
     }
-    try write(file, to: url)
+    try write(file, to: temporary)
+    guard renamex_np(temporary.path, url.path, UInt32(RENAME_EXCL)) == 0 else {
+      throw KagiError(.dataError, "新版本发布失败（可能已有同版本）：\(String(cString: strerror(errno)))。")
+    }
   }
 
   func entryURL(_ entry: String, _ version: Int) -> URL {
@@ -117,7 +129,7 @@ public struct VaultStore: Sendable {
   }
 
   static func versionName(_ version: Int) -> String {
-    String(format: "%04d.kagi", version)
+    String(format: "%04ld.kagi", version)
   }
 
   // MARK: index/
@@ -126,7 +138,8 @@ public struct VaultStore: Sendable {
     try files(in: indexDir, suffix: ".kagi").map { url -> IndexFile in
       let name = "index/\(url.lastPathComponent)"
       let file: IndexFile = try read(url, name)
-      guard file.entry == url.deletingPathExtension().lastPathComponent, file.format == Format.index else {
+      guard file.entry == url.deletingPathExtension().lastPathComponent, file.format == Format.index
+      else {
         throw KagiError(.dataError, "\(name) 的内容和它的文件名对不上，可能被调换过。")
       }
       return file
@@ -136,6 +149,24 @@ public struct VaultStore: Sendable {
   public func writeIndex(_ file: IndexFile) throws {
     try FileManager.default.createDirectory(at: indexDir, withIntermediateDirectories: true)
     try write(file, to: indexDir.appendingPathComponent("\(file.entry).kagi"))
+  }
+
+  /// flock 只协调本机进程，不能充当跨设备同步锁。
+  public func withWriteLock<T>(_ body: () throws -> T) throws -> T {
+    let fd = open(
+      root.appendingPathComponent(".write.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
+      0o600)
+    guard fd >= 0 else { throw KagiError(.software, "无法打开库写锁。") }
+    defer { close(fd) }
+    guard flock(fd, LOCK_EX) == 0 else { throw KagiError(.software, "无法锁定库。") }
+    defer { _ = flock(fd, LOCK_UN) }
+    return try body()
+  }
+
+  public func entryIDs() throws -> [String] {
+    guard FileManager.default.fileExists(atPath: entriesDir.path) else { return [] }
+    return try FileManager.default.contentsOfDirectory(atPath: entriesDir.path)
+      .filter { !$0.hasPrefix(".") }.sorted()
   }
 
   // MARK: 文件

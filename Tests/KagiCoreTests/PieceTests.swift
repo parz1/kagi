@@ -47,7 +47,9 @@ final class RefTests: XCTestCase {
   }
 
   func testInvalidRefs() {
-    for text in ["", "Resend/api-key", "/abs", "a//b", "a/../b", "../x", "a b", "a/", "-x", "中文/key"] {
+    for text in [
+      "", "Resend/api-key", "/abs", "a//b", "a/../b", "../x", "a b", "a/", "-x", "中文/key",
+    ] {
       XCTAssertThrowsError(try Ref(text), text)
     }
   }
@@ -78,7 +80,9 @@ final class RedactorTests: XCTestCase {
     let line = "Using \(secret) now\n"
     for cut in 1..<line.count {
       let i = line.index(line.startIndex, offsetBy: cut)
-      XCTAssertEqual(run([String(line[..<i]), String(line[i...])], redactor), "Using ‹kagi:demo/fake-token› now\n")
+      XCTAssertEqual(
+        run([String(line[..<i]), String(line[i...])], redactor),
+        "Using ‹kagi:demo/fake-token› now\n")
     }
   }
 
@@ -96,6 +100,11 @@ final class RedactorTests: XCTestCase {
   func testShortValuesAreNotRedacted() {
     let r = Redactor(values: [("demo/short", Data("abc".utf8))])
     XCTAssertEqual(run(["abcabc"], r), "abcabc")
+  }
+
+  func testAuditCanRedactEvenOneByteValues() {
+    let r = Redactor(values: [("demo/short", Data("x".utf8))], minimumLength: 1)
+    XCTAssertEqual(r.redact("echo x"), "echo ‹kagi:demo/short›")
   }
 
   func testRedactsStrings() {
@@ -125,7 +134,8 @@ final class InitiatorTests: XCTestCase {
   func testAppName() {
     XCTAssertEqual(Initiator.appName("/Applications/iTerm.app/Contents/MacOS/iTerm2"), "iTerm")
     XCTAssertEqual(
-      Initiator.appName("/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"), "Terminal")
+      Initiator.appName("/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+      "Terminal")
     XCTAssertNil(Initiator.appName("/bin/zsh"))
   }
 }

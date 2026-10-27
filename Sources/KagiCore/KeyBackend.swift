@@ -105,9 +105,11 @@ public final class SoftwareBackend: KeyBackend, @unchecked Sendable {
 
   public var decision: Decision
   public private(set) var prompts: [String] = []
+  private let onPrompt: (@Sendable (String) -> Void)?
 
-  public init(decision: Decision = .approve) {
+  public init(decision: Decision = .approve, onPrompt: (@Sendable (String) -> Void)? = nil) {
     self.decision = decision
+    self.onPrompt = onPrompt
   }
 
   public var isAvailable: Bool { true }
@@ -119,6 +121,7 @@ public final class SoftwareBackend: KeyBackend, @unchecked Sendable {
 
   public func openWithPresence(_ box: HPKEBox, blob: Data, binding: Data, reason: String) throws -> Data {
     prompts.append(reason)
+    onPrompt?(reason)
     switch decision {
     case .approve: break
     case .deny: throw KeyFailure.denied
@@ -128,7 +131,8 @@ public final class SoftwareBackend: KeyBackend, @unchecked Sendable {
   }
 
   public func openSilently(_ box: HPKEBox, blob: Data, binding: Data) throws -> Data {
-    try open(box, blob: blob, binding: binding)
+    if case .locked = decision { throw KeyFailure.locked }
+    return try open(box, blob: blob, binding: binding)
   }
 
   func open(_ box: HPKEBox, blob: Data, binding: Data) throws -> Data {
