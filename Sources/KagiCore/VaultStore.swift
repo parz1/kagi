@@ -99,7 +99,9 @@ public struct VaultStore: Sendable {
   public func readEntry(_ entry: String, version: Int) throws -> EntryFile {
     let name = "entries/\(entry)/\(Self.versionName(version))"
     let file: EntryFile = try read(entryURL(entry, version), name)
-    guard file.entry == entry, file.version == version, file.format == Format.entry else {
+    guard file.entry == entry, file.version == version,
+      [Format.entry, Format.typedEntry].contains(file.format)
+    else {
       throw KagiError(.dataError, "\(name) 的内容和它的位置对不上，可能被调换过。")
     }
     return file
@@ -138,7 +140,8 @@ public struct VaultStore: Sendable {
     try files(in: indexDir, suffix: ".kagi").map { url -> IndexFile in
       let name = "index/\(url.lastPathComponent)"
       let file: IndexFile = try read(url, name)
-      guard file.entry == url.deletingPathExtension().lastPathComponent, file.format == Format.index
+      guard file.entry == url.deletingPathExtension().lastPathComponent,
+        [Format.index, Format.managedIndex, Format.typedIndex].contains(file.format)
       else {
         throw KagiError(.dataError, "\(name) 的内容和它的文件名对不上，可能被调换过。")
       }
@@ -151,8 +154,18 @@ public struct VaultStore: Sendable {
     try write(file, to: indexDir.appendingPathComponent("\(file.entry).kagi"))
   }
 
+  func readCatalog() throws -> CatalogFile? {
+    let url = root.appendingPathComponent("catalog.kagi")
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return try read(url, "catalog.kagi")
+  }
+
+  func writeCatalog(_ file: CatalogFile) throws {
+    try write(file, to: root.appendingPathComponent("catalog.kagi"))
+  }
+
   /// flock 只协调本机进程，不能充当跨设备同步锁。
-  public func withWriteLock<T>(_ body: () throws -> T) throws -> T {
+  public func withWriteLock<T>(allowPendingSync: Bool = false, _ body: () throws -> T) throws -> T {
     let fd = open(
       root.appendingPathComponent(".write.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
       0o600)
@@ -160,7 +173,14 @@ public struct VaultStore: Sendable {
     defer { close(fd) }
     guard flock(fd, LOCK_EX) == 0 else { throw KagiError(.software, "无法锁定库。") }
     defer { _ = flock(fd, LOCK_UN) }
+    if !allowPendingSync { try ensureSyncReady() }
     return try body()
+  }
+
+  func ensureSyncReady() throws {
+    guard !FileManager.default.fileExists(atPath: root.appendingPathComponent(".sync-pending").path) else {
+      throw KagiError(.tempFail, "上次同步尚未完成，请用相同目标再次运行 kagi sync 恢复。")
+    }
   }
 
   public func entryIDs() throws -> [String] {

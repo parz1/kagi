@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Security
 
-/// kagi 用到的全部加密运算。只调 CryptoKit 和系统随机数，不自己实现任何算法。
+/// Vault 加密和密钥封装。密码学原语由 CryptoKit 和系统随机数实现。
 public enum Crypto {
   public static let hpkeSuite = HPKE.Ciphersuite.P256_SHA256_AES_GCM_256
 

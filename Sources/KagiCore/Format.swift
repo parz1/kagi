@@ -6,7 +6,11 @@ public enum Format {
   public static let device = "kagi-device/1"
   public static let recovery = "kagi-recovery/1"
   public static let entry = "kagi-entry/1"
+  public static let typedEntry = "kagi-entry/2"
   public static let index = "kagi-index/1"
+  public static let managedIndex = "kagi-index/2"
+  public static let typedIndex = "kagi-index/3"
+  public static let catalog = "kagi-catalog/1"
   public static let local = "kagi-local/1"
 }
 
@@ -60,6 +64,21 @@ public struct EntryFile: Codable, Equatable, Sendable {
 public struct EntryPlain: Codable, Equatable, Sendable {
   public var ref: String
   public var value: String
+  public var kind: CredentialKind
+
+  public init(ref: String, value: String, kind: CredentialKind = .secret) {
+    self.ref = ref
+    self.value = value
+    self.kind = kind
+  }
+
+  enum CodingKeys: String, CodingKey { case ref, value, kind }
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    ref = try values.decode(String.self, forKey: .ref)
+    value = try values.decode(String.self, forKey: .value)
+    kind = try values.decodeIfPresent(CredentialKind.self, forKey: .kind) ?? .secret
+  }
 }
 
 /// index/<条目>.kagi：一条的名字和元数据，用索引密钥加密。
@@ -78,16 +97,54 @@ public struct IndexRecord: Codable, Equatable, Sendable {
   public var created: String
   public var updated: String
   public var latestVersion: Int
+  public var metadata: KeyMetadata
+  public var kind: CredentialKind
+
+  public init(
+    ref: String, issuer: String?, usedIn: String?, created: String, updated: String,
+    latestVersion: Int, metadata: KeyMetadata = KeyMetadata(), kind: CredentialKind = .secret
+  ) {
+    self.ref = ref
+    self.issuer = issuer
+    self.usedIn = usedIn
+    self.created = created
+    self.updated = updated
+    self.latestVersion = latestVersion
+    self.metadata = metadata
+    self.kind = kind
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case ref, issuer, usedIn, created, updated, latestVersion, metadata, kind
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    ref = try values.decode(String.self, forKey: .ref)
+    issuer = try values.decodeIfPresent(String.self, forKey: .issuer)
+    usedIn = try values.decodeIfPresent(String.self, forKey: .usedIn)
+    created = try values.decode(String.self, forKey: .created)
+    updated = try values.decode(String.self, forKey: .updated)
+    latestVersion = try values.decode(Int.self, forKey: .latestVersion)
+    metadata = try values.decodeIfPresent(KeyMetadata.self, forKey: .metadata) ?? KeyMetadata()
+    kind = try values.decodeIfPresent(CredentialKind.self, forKey: .kind) ?? .secret
+  }
 }
 
 /// 附加数据和 HPKE info：把每段密文绑定到它所在的库、条目和版本。
 public enum Binding {
-  public static func entry(vault: String, entry: String, version: Int, created: String) -> Data {
-    Data("\(Format.entry)|\(vault)|\(entry)|\(version)|\(created)".utf8)
+  public static func entry(
+    vault: String, entry: String, version: Int, created: String, format: String = Format.entry
+  ) -> Data {
+    Data("\(format)|\(vault)|\(entry)|\(version)|\(created)".utf8)
   }
 
-  public static func index(vault: String, entry: String) -> Data {
-    Data("\(Format.index)|\(vault)|\(entry)".utf8)
+  public static func index(vault: String, entry: String, format: String = Format.index) -> Data {
+    Data("\(format)|\(vault)|\(entry)".utf8)
+  }
+
+  public static func catalog(vault: String) -> Data {
+    Data("\(Format.catalog)|\(vault)".utf8)
   }
 
   public static func recovery(vault: String, purpose: KeyPurpose) -> Data {

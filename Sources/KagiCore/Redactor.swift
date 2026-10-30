@@ -47,13 +47,14 @@ public final class Redactor: @unchecked Sendable {
     var i = 0
     let count = pending.count
     scan: while i < count {
+      // 短验证码也可能是另一个较长值的前缀；分块未完整时先等待，不能先消费短匹配。
+      if !final, isPrefixOfSecret(from: i) {
+        break
+      }
       for secret in secrets where matches(secret.bytes, at: i) {
         output += secret.replacement
         i += secret.bytes.count
         continue scan
-      }
-      if !final, isPrefixOfSecret(from: i) {
-        break
       }
       output.append(pending[i])
       i += 1

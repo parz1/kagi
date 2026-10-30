@@ -78,24 +78,9 @@ enum Commands {
     UseLog(url: localStore().logURL)
   }
 
-  /// 默认把库建在 Google Drive 的同步文件夹里。
+  /// Local-first: cloud providers are explicit transports, never a required account.
   static func defaultVaultRoot() throws -> URL {
-    let cloud = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library/CloudStorage", isDirectory: true)
-    let drives =
-      (try? FileManager.default.contentsOfDirectory(atPath: cloud.path))?
-      .filter { $0.hasPrefix("GoogleDrive-") }.sorted() ?? []
-    let roots = drives.compactMap { drive -> URL? in
-      ["My Drive", "我的云端硬盘", "マイドライブ"]
-        .map { cloud.appendingPathComponent(drive).appendingPathComponent($0, isDirectory: true) }
-        .first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-    guard roots.count == 1 else {
-      throw KagiError(
-        .usage, roots.isEmpty ? "找不到 Google Drive 的同步文件夹。" : "这台 Mac 上有多个 Google Drive 账号。",
-        hint: "用 --vault <路径> 指定库放在哪里。")
-    }
-    return roots[0].appendingPathComponent("kagi", isDirectory: true)
+    localStore().dir.appendingPathComponent("vault", isDirectory: true)
   }
 
   static func vaultRoot(_ option: String?) throws -> URL {
@@ -214,6 +199,10 @@ enum Commands {
     let raw = parser.flag("--raw")
     let issuer = try parser.value(for: "--issuer")
     let usedIn = try parser.value(for: "--used-in")
+    let space = try parser.value(for: "--space")
+    let title = try parser.value(for: "--title")
+    var tags: [String] = []
+    while let tag = try parser.value(for: "--tag") { tags.append(tag) }
     let positional = try parser.positionals()
     guard positional.count == 1 else {
       throw KagiError(.usage, "用法：kagi set <引用> [--stdin] [--issuer <签发方>] [--used-in <用在哪>]")
@@ -221,7 +210,17 @@ enum Commands {
     let ref = try Ref(positional[0])
     let initiator = Initiator.current()
     let session = try Session(local: localStore(), backend: backend())
-    let existing = try session.find(ref)
+    let existing = try session.find(ref, includeArchived: true)
+    guard existing == nil || existing?.record.kind == .secret else {
+      throw KagiError(.usage, "该引用是验证器凭据，不能用普通 set 覆盖。")
+    }
+    guard existing?.record.metadata.archived != true else {
+      throw KagiError(.usage, "此 key 已归档，请先用 kagi restore 恢复。")
+    }
+    var metadata = existing?.record.metadata ?? KeyMetadata()
+    if let space { metadata.space = space }
+    if let title { metadata.title = title }
+    if !tags.isEmpty { metadata.tags = tags }
 
     if let existing {
       Term.say(
@@ -274,7 +273,8 @@ enum Commands {
       throw error
     }
     let version = try session.write(
-      ref: ref, value: value, issuer: issuer, usedIn: usedIn, existing: existing, key: key)
+      ref: ref, value: value, issuer: issuer, usedIn: usedIn, existing: existing, key: key,
+      metadata: metadata)
     useLog().append(
       UseRecord(
         action: "set", refs: [ref.path], command: nil,
@@ -306,9 +306,22 @@ enum Commands {
       }
       envRefs.append((String(pair[..<eq]), try Ref(String(pair[pair.index(after: eq)...]))))
     }
+    var otpRefs: [(name: String, ref: Ref)] = []
+    while let pair = try parser.value(for: "--otp") {
+      guard let eq = pair.firstIndex(of: "="), isValidEnvName(String(pair[..<eq])) else {
+        throw KagiError(.usage, "--otp 的写法是 变量名=<TOTP 引用>。")
+      }
+      otpRefs.append((String(pair[..<eq]), try Ref(String(pair[pair.index(after: eq)...]))))
+    }
     let stdinRef = try parser.value(for: "--stdin").map { try Ref($0) }
+    let otpStdinRef = try parser.value(for: "--otp-stdin").map { try Ref($0) }
     try parser.finish()
-    guard !envRefs.isEmpty || stdinRef != nil else {
+    guard stdinRef == nil || otpStdinRef == nil,
+      Set((envRefs + otpRefs).map(\.name)).count == envRefs.count + otpRefs.count
+    else {
+      throw KagiError(.usage, "环境变量名不能重复，--stdin 与 --otp-stdin 不能同时使用。")
+    }
+    guard !envRefs.isEmpty || !otpRefs.isEmpty || stdinRef != nil || otpStdinRef != nil else {
       throw KagiError(.usage, "至少要用 --env 或 --stdin 交出一条值。")
     }
 
@@ -323,7 +336,9 @@ enum Commands {
         hint: "请缩短命令；如使用脚本，请先由用户检查脚本内容。kagi 不验证脚本内容。")
     }
     var refs: [String] = []
-    for ref in envRefs.map(\.ref) + (stdinRef.map { [$0] } ?? []) where !refs.contains(ref.path) {
+    for ref in (envRefs + otpRefs).map(\.ref) + (stdinRef.map { [$0] } ?? [])
+      + (otpStdinRef.map { [$0] } ?? []) where !refs.contains(ref.path)
+    {
       refs.append(ref.path)
     }
 
@@ -341,9 +356,18 @@ enum Commands {
       resolved[ref] = listing
     }
 
+    let otpPaths = Set(otpRefs.map { $0.ref.path } + (otpStdinRef.map { [$0.path] } ?? []))
+    let rawPaths = Set(envRefs.map { $0.ref.path } + (stdinRef.map { [$0.path] } ?? []))
+    guard rawPaths.allSatisfy({ resolved[$0]?.record.kind == .secret }),
+      otpPaths.allSatisfy({ resolved[$0]?.record.kind == .totp })
+    else {
+      throw KagiError(.usage, "验证器种子/私钥不能通过普通 --env/--stdin 交出；TOTP 请用 --otp 或 --otp-stdin。")
+    }
     let injections =
       envRefs.map { "\($0.name)=\($0.ref.path)" }
+      + otpRefs.map { "TOTP \($0.name)=\($0.ref.path)" }
       + (stdinRef.map { ["stdin=\($0.path)"] } ?? [])
+      + (otpStdinRef.map { ["TOTP stdin=\($0.path)"] } ?? [])
     let reason = try Reason.run(
       injections: injections, command: commandText,
       directory: FileManager.default.currentDirectoryPath, initiator: initiator)
@@ -362,11 +386,16 @@ enum Commands {
     }
 
     var values: [(ref: String, value: Data)] = []
+    let now = UInt64(Date().timeIntervalSince1970)
     for ref in refs {
-      values.append((ref, try session.read(resolved[ref]!, key: key).value))
+      let value =
+        try otpPaths.contains(ref)
+        ? Data(session.totpCode(resolved[ref]!, at: now, key: key).code.utf8)
+        : session.read(resolved[ref]!, key: key).value
+      values.append((ref, value))
     }
     var environment: [String: String] = [:]
-    for (name, ref) in envRefs {
+    for (name, ref) in envRefs + otpRefs {
       let value = values.first { $0.ref == ref.path }!.value
       guard let text = String(data: value, encoding: .utf8), !text.contains("\0") else {
         throw KagiError(
@@ -374,9 +403,11 @@ enum Commands {
       }
       environment[name] = text
     }
-    let stdinData = stdinRef.map { ref in values.first { $0.ref == ref.path }!.value }
+    let stdinData = (stdinRef ?? otpStdinRef).map { ref in
+      values.first { $0.ref == ref.path }!.value
+    }
 
-    let redactor = Redactor(values: values)
+    let redactor = Redactor(values: values, minimumLength: 1)
     let code: Int32
     do {
       code = try Runner.run(
@@ -384,7 +415,7 @@ enum Commands {
     } catch let error as KagiError {
       useLog().append(
         UseRecord(
-          action: "run", refs: refs, command: commandText,
+          action: "run", refs: refs, command: redactor.redact(commandText),
           fullCommand: initiator.shellCommand.map(redactor.redact), initiator: initiator,
           result: "error",
           exitCode: error.code.rawValue))
@@ -392,7 +423,7 @@ enum Commands {
     }
     useLog().append(
       UseRecord(
-        action: "run", refs: refs, command: commandText,
+        action: "run", refs: refs, command: redactor.redact(commandText),
         fullCommand: initiator.shellCommand.map(redactor.redact),
         initiator: initiator, result: "approved", exitCode: code))
     return code
@@ -416,35 +447,63 @@ enum Commands {
 
   static func list(_ args: [String]) throws {
     var parser = ArgParser(args)
+    let json = parser.flag("--json")
+    let all = parser.flag("--all")
+    let archived = parser.flag("--archived")
+    let space = try parser.value(for: "--space")
+    let search = try parser.value(for: "--search")
+    var tags: [String] = []
+    while let tag = try parser.value(for: "--tag") { tags.append(tag) }
     try parser.finish()
+    guard !(all && archived) else { throw KagiError(.usage, "--all 和 --archived 只能选一个。") }
     let session = try Session(local: localStore(), backend: backend())
-    let listings = try session.listings()
+    let listings = try session.queryKeys(
+      KeyQuery(
+        space: space, tags: tags, text: search,
+        scope: all ? .all : archived ? .archived : .active))
+    if json {
+      try printJSON(listings)
+      return
+    }
     guard !listings.isEmpty else {
-      Term.print("库里还没有条目。存第一条：kagi set <引用>")
+      Term.print("没有匹配的 key。存一条：kagi set <引用>")
       return
     }
     let rows = listings.map { item -> [String] in
       [
-        item.ref, item.record.issuer ?? "（未填）", item.record.usedIn ?? "（未填）",
-        "\(Term.shortTime(item.record.updated)) · 第 \(item.record.latestVersion) 版",
+        item.ref, item.record.kind.rawValue, item.record.metadata.title ?? "—",
+        item.record.metadata.space,
+        item.record.metadata.tags.joined(separator: ", "),
+        item.record.metadata.archived ? "已归档" : "可用",
       ]
     }
-    printTable(header: ["引用", "签发方", "用在哪", "更新"], rows: rows)
+    printTable(header: ["引用", "类型", "名称", "Space", "标签", "状态"], rows: rows)
     Term.print("共 \(listings.count) 条 · 库 \(session.shortID) · 没有用指纹", .dim)
   }
 
   static func whereIs(_ args: [String]) throws {
     var parser = ArgParser(args)
+    let json = parser.flag("--json")
     let positional = try parser.positionals()
     guard positional.count == 1 else { throw KagiError(.usage, "用法：kagi where <引用>") }
     let ref = try Ref(positional[0])
     let session = try Session(local: localStore(), backend: backend())
-    let listings = try session.listings()
+    let listings = try session.listings(includeArchived: true)
     guard let item = listings.first(where: { $0.ref == ref.path }) else {
       throw notFound(ref.path, among: listings.map(\.ref))
     }
+    if json {
+      try printJSON(item)
+      return
+    }
     let versions = try session.store.versions(of: item.entry)
     Term.print(item.ref, .bold)
+    Term.print("  类型      \(item.record.kind.rawValue)")
+    Term.print("  名称      \(item.record.metadata.title ?? "（未填）")")
+    Term.print("  Space     \(item.record.metadata.space)")
+    Term.print("  标签      \(item.record.metadata.tags.joined(separator: "、"))")
+    Term.print("  状态      \(item.record.metadata.archived ? "已归档" : "可用")")
+    if let notes = item.record.metadata.notes { Term.print("  备注      \(notes)") }
     Term.print("  签发方    \(item.record.issuer ?? "（未填）")")
     Term.print("  用在哪    \(item.record.usedIn ?? "（未填）")")
     Term.print("  创建      \(Term.shortTime(item.record.created))")
@@ -548,7 +607,7 @@ enum Commands {
       UseRecord(
         action: "repair-index", refs: [], command: nil, fullCommand: nil,
         initiator: initiator, result: "approved"))
-    Term.say("已重建 \(count) 条索引。缺失索引的签发方和用途无法恢复，请按需补填。", .ok)
+    Term.say("已重建 \(count) 条索引。缺失索引的项会归档到默认 Space，管理信息需核对补填后再恢复。", .ok)
   }
 
   // MARK: recover
@@ -556,7 +615,15 @@ enum Commands {
   static func recover(_ args: [String]) throws {
     var parser = ArgParser(args)
     let vaultOption = try parser.value(for: "--vault")
+    let remoteOption = try parser.value(for: "--remote")
+    let vaultID = try parser.value(for: "--vault-id")
     try parser.finish()
+    guard (remoteOption == nil) == (vaultID == nil),
+      vaultID == nil || (vaultID!.count <= 64 && vaultID!.utf8.allSatisfy {
+        (97...122).contains($0) || (48...57).contains($0)
+      } && !vaultID!.isEmpty), remoteOption == nil || remoteOption!.hasPrefix("/") else {
+      throw KagiError(.usage, "远端恢复需要 --remote <绝对路径> 和 --vault-id <库 ID>。")
+    }
     let initiator = Initiator.current()
     try requireTerminal("recover", "要输入恢复密钥", initiator: initiator)
     let local = localStore()
@@ -565,9 +632,13 @@ enum Commands {
     }
     let root = try vaultRoot(vaultOption)
     let store = VaultStore(root: root)
-    let vault = try store.readVault()
-    let count = try store.indexFiles().count
-    Term.print("找到库 \(Kagi.shortID(vault.vault))（\(count) 条），位置：\(root.path)")
+    if let remoteOption, let vaultID {
+      Term.print("从同步仓库恢复库 \(vaultID)：\(remoteOption)，本地位置：\(root.path)")
+    } else {
+      let vault = try store.readVault()
+      let count = try store.indexFiles().count
+      Term.print("找到库 \(Kagi.shortID(vault.vault))（\(count) 条），位置：\(root.path)")
+    }
     Term.print("这台 Mac 还不在库里。")
 
     var recoveryKey: RecoveryKey?
@@ -585,10 +656,19 @@ enum Commands {
     guard let recoveryKey else { throw KagiError(.usage, "没有读到恢复密钥。") }
 
     Term.print("等待指纹确认…", .dim)
-    let others = try store.devices()
-    let (joined, device) = try Kagi.recover(
-      at: root, recoveryKey: recoveryKey, deviceName: computerName(), backend: backend(),
-      local: local, reason: { "让这台 Mac 加入库 \($0)" })
+    let others = remoteOption == nil ? try store.devices() : []
+    let joined: VaultFile
+    let device: DeviceFile
+    if let remoteOption, let vaultID {
+      let transport = try DirectorySyncTransport(root: URL(fileURLWithPath: remoteOption).appendingPathComponent(vaultID))
+      (joined, device) = try Kagi.recoverFromSync(with: transport, at: root,
+        recoveryKey: recoveryKey, deviceName: computerName(), backend: backend(),
+        local: local, reason: { "让这台 Mac 加入库 \($0)" })
+    } else {
+      (joined, device) = try Kagi.recover(
+        at: root, recoveryKey: recoveryKey, deviceName: computerName(), backend: backend(),
+        local: local, reason: { "让这台 Mac 加入库 \($0)" })
+    }
     useLog().append(
       UseRecord(
         action: "recover", refs: [], command: nil, fullCommand: nil, initiator: initiator,

@@ -283,9 +283,14 @@ final class VaultTests: XCTestCase {
       at: session.store.indexDir.appendingPathComponent(item.entry + ".kagi"))
     XCTAssertThrowsError(try session.listings())
     XCTAssertEqual(try session.repairIndex(key: key), 1)
-    let restored = try XCTUnwrap(session.find(ref))
+    let restored = try XCTUnwrap(session.find(ref, includeArchived: true))
     XCTAssertNil(restored.record.issuer)
-    XCTAssertEqual(try session.read(restored, key: key).value, Data("FAKE-ONE".utf8))
+    XCTAssertTrue(restored.record.metadata.archived)
+    var metadata = restored.record.metadata
+    metadata.archived = false
+    try session.updateKey(restored, metadata: metadata, issuer: nil, usedIn: nil, key: key)
+    XCTAssertEqual(
+      try session.read(XCTUnwrap(session.find(ref)), key: key).value, Data("FAKE-ONE".utf8))
   }
 
   func testRepairUpdatesStaleIndexButRefusesMissingNewVersion() throws {
@@ -352,11 +357,14 @@ final class VaultTests: XCTestCase {
     let session = try Session(local: local, backend: SoftwareBackend())
     let key = try session.unlock(reason: "测试", action: .write, byAgent: false)
     for ref in ["demo/one", "demo/two"] {
-      try session.write(ref: Ref(ref), value: Data("FAKE-VALUE".utf8), issuer: nil, usedIn: nil, existing: nil, key: key)
+      try session.write(
+        ref: Ref(ref), value: Data("FAKE-VALUE".utf8), issuer: nil, usedIn: nil, existing: nil,
+        key: key)
     }
     let ids = try session.store.entryIDs()
     for id in ids {
-      try FileManager.default.removeItem(at: session.store.indexDir.appendingPathComponent(id + ".kagi"))
+      try FileManager.default.removeItem(
+        at: session.store.indexDir.appendingPathComponent(id + ".kagi"))
     }
     // 最后一个条目损坏；前面的条目即便可恢复，也不应先写出索引。
     try Data("corrupt".utf8).write(to: session.store.entryURL(ids.last!, 1))

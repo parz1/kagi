@@ -102,6 +102,19 @@ final class RedactorTests: XCTestCase {
     XCTAssertEqual(run(["abcabc"], r), "abcabc")
   }
 
+  func testOTPThatPrefixesAnotherSecretDoesNotLeakAcrossChunks() {
+    let values = [
+      ("demo/otp", Data("755224".utf8)), ("demo/api", Data("755224-FAKE-API-KEY".utf8)),
+    ]
+    let redactor = Redactor(values: values)
+    XCTAssertTrue(redactor.feed(Data("755224".utf8)).isEmpty)
+    let output = redactor.feed(Data("-FAKE-API-KEY".utf8)) + redactor.finish()
+    XCTAssertEqual(String(decoding: output, as: UTF8.self), "‹kagi:demo/api›")
+    let shortOnly = Redactor(values: values)
+    XCTAssertTrue(shortOnly.feed(Data("755224".utf8)).isEmpty)
+    XCTAssertEqual(String(decoding: shortOnly.finish(), as: UTF8.self), "‹kagi:demo/otp›")
+  }
+
   func testAuditCanRedactEvenOneByteValues() {
     let r = Redactor(values: [("demo/short", Data("x".utf8))], minimumLength: 1)
     XCTAssertEqual(r.redact("echo x"), "echo ‹kagi:demo/short›")

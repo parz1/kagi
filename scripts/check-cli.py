@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KAGI = str(ROOT / '.build/debug/kagi')
 
 
-class CLITests(unittest.TestCase):
+class CLIFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='kagi-cli-')
         self.addCleanup(self.temp.cleanup)
@@ -37,6 +37,9 @@ class CLITests(unittest.TestCase):
         return {str(path.relative_to(self.root / 'vault')): path.read_bytes()
                 for path in (self.root / 'vault').rglob('*') if path.is_file()}
 
+
+
+class CLITests(CLIFixture):
     def test_cancelled_creation_and_overwrite_leave_vault_unchanged(self):
         self.put('demo/token')
         before = self.vault_snapshot()
@@ -147,6 +150,85 @@ class CLITests(unittest.TestCase):
             self.assertIsNotNone(record['fullCommand'])
             self.assertNotIn(value, record['fullCommand'])
             self.assertIn('‹kagi:demo/cancelled›', record['fullCommand'])
+
+    def test_spaces_tags_edit_search_and_json_keep_reference_and_value(self):
+        self.assertEqual(self.call('space', 'create', 'work', '--name', '工作').returncode, 0)
+        result = self.call('set', 'demo/token', '--stdin', '--space', 'work',
+                           '--title', '生产接口', '--tag', 'PROD', '--tag', 'api',
+                           data=b'FAKE-MANAGED-TOKEN')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.call('ls', '--space', 'work', '--tag', 'prod', '--tag', 'api',
+                           '--search', '生产', '--json')
+        rows = json.loads(result.stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['record']['metadata']['tags'], ['api', 'prod'])
+        self.assertNotIn(b'FAKE-MANAGED-TOKEN', result.stdout)
+        entry = rows[0]['entry']
+        result = self.call('edit', 'demo/token', '--space', 'default', '--title', '新的名字',
+                           '--notes', '负责人已确认', '--clear-tags')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(self.call('where', 'demo/token', '--json').stdout)
+        self.assertEqual(row['entry'], entry)
+        self.assertEqual(row['record']['ref'], 'demo/token')
+        self.assertEqual(row['record']['latestVersion'], 1)
+        self.assertEqual(row['record']['metadata']['space'], 'default')
+        self.assertEqual(row['record']['metadata']['tags'], [])
+        self.assertEqual(json.loads(self.call('tags', '--json').stdout), [])
+        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/bin/sh', '-c',
+                           'test "$DEMO" = FAKE-MANAGED-TOKEN')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.call('space', 'remove', 'work').returncode, 0)
+
+    def test_archive_excludes_run_and_restore_preserves_versions(self):
+        self.put('demo/token')
+        self.assertEqual(self.call('archive', 'demo/token').returncode, 0)
+        self.assertEqual(json.loads(self.call('ls', '--json').stdout), [])
+        archived = json.loads(self.call('ls', '--archived', '--json').stdout)
+        self.assertEqual(len(archived), 1)
+        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/usr/bin/true')
+        self.assertEqual(result.returncode, 66)
+        result = self.call('set', 'demo/token', '--stdin', data=b'FAKE-BLOCKED-UPDATE')
+        self.assertEqual(result.returncode, 64)
+        self.assertEqual(self.call('restore', 'demo/token').returncode, 0)
+        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/bin/sh', '-c',
+                           'test "$DEMO" = FAKE-TOKEN-FOR-TEST')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = json.loads(self.call('where', 'demo/token', '--json').stdout)
+        self.assertEqual(row['record']['latestVersion'], 1)
+
+    def test_management_denial_and_lock_leave_catalog_and_index_unchanged(self):
+        self.put('demo/token')
+        self.assertEqual(self.call('space', 'create', 'work').returncode, 0)
+        before = self.vault_snapshot()
+        for decision, code in [('deny', 77), ('locked', 75)]:
+            self.env['KAGI_DEBUG_AUTH_DECISION'] = decision
+            for args in [('space', 'create', 'blocked'), ('space', 'rename', 'work', '--name', 'No'),
+                         ('space', 'remove', 'work'), ('edit', 'demo/token', '--space', 'work'),
+                         ('archive', 'demo/token')]:
+                result = self.call(*args)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(self.vault_snapshot(), before)
+
+    def test_readonly_management_with_denied_auth_does_not_prompt(self):
+        self.put('demo/token')
+        self.env['KAGI_DEBUG_AUTH_DECISION'] = 'deny'
+        for args in [('space', 'ls', '--json'), ('tags', '--json'), ('ls', '--json'),
+                     ('where', 'demo/token', '--json')]:
+            result = self.call(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            json.loads(result.stdout)
+            self.assertNotIn('模拟授权说明：'.encode(), result.stderr)
+
+    def test_repair_missing_index_does_not_silently_reactivate_key(self):
+        self.put('demo/token')
+        self.assertEqual(self.call('archive', 'demo/token').returncode, 0)
+        next((self.root / 'vault/index').glob('*.kagi')).unlink()
+        self.assertEqual(self.call('repair-index').returncode, 0)
+        self.assertEqual(json.loads(self.call('ls', '--json').stdout), [])
+        rows = json.loads(self.call('ls', '--archived', '--json').stdout)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['record']['metadata']['space'], 'default')
+        self.assertEqual(self.call('run', '--env', 'DEMO=demo/token', '--', '/usr/bin/true').returncode, 66)
 
     def test_recovery_names_cannot_collide(self):
         expected = {'demo/foo': b'FAKE-FIRST', 'demo/foo.txt': b'FAKE-SECOND',

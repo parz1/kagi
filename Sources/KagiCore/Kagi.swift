@@ -18,9 +18,11 @@ public struct PendingVault {
 }
 
 /// 一条值的名字和元数据，加上它在库里的条目 ID。
-public struct Listing: Sendable {
+public struct Listing: Codable, Sendable {
   public let entry: String
   public let record: IndexRecord
+  /// Opaque optimistic-concurrency token; wall-clock/version equality is insufficient after sync.
+  public let revision: String
   public var ref: String { record.ref }
 }
 
@@ -99,8 +101,10 @@ public enum Kagi {
     let (device, state) = try enroll(
       vault: vault, root: root, secretKey: secretKey, indexKey: indexKey, deviceName: deviceName,
       backend: backend, reason: reason(shortID(vault.vault)))
-    try store.writeDevice(device)
-    try local.save(state)
+    try store.withWriteLock {
+      try store.writeDevice(device)
+      try local.save(state)
+    }
     return (vault, device)
   }
 
@@ -250,11 +254,14 @@ public final class Session {
   }
 
   /// 所有条目的名字和元数据，按引用排序。解不开的条目抛错，不悄悄跳过。
-  public func listings() throws -> [Listing] {
-    try checkedListings(validateEntries: true)
+  public func listings(includeArchived: Bool = false) throws -> [Listing] {
+    try checkedListings(validateEntries: true).filter {
+      includeArchived || !$0.record.metadata.archived
+    }
   }
 
-  private func checkedListings(validateEntries: Bool) throws -> [Listing] {
+  func checkedListings(validateEntries: Bool) throws -> [Listing] {
+    try store.ensureSyncReady()
     let key = try indexKey()
     let result = try store.indexFiles().map { file -> Listing in
       guard file.vault == vault.vault else {
@@ -263,15 +270,27 @@ public final class Session {
       let plain: Data
       do {
         plain = try Crypto.open(
-          file.box, key: key, binding: Binding.index(vault: vault.vault, entry: file.entry))
+          file.box, key: key,
+          binding: Binding.index(vault: vault.vault, entry: file.entry, format: file.format))
       } catch {
         throw KagiError(.dataError, "index/\(file.entry).kagi 解不开，可能被改过。")
       }
       let record = try JSON.decode(IndexRecord.self, from: plain, file: "index/\(file.entry).kagi")
-      return Listing(entry: file.entry, record: record)
+      guard (file.format == Format.typedIndex) == (record.kind != .secret) else {
+        throw KagiError(.dataError, "索引格式与凭据类型不一致。")
+      }
+      guard (try? Ref(record.ref)) != nil, let normalized = try? record.metadata.normalized(),
+        normalized == record.metadata
+      else { throw KagiError(.dataError, "条目的管理字段无效。") }
+      return Listing(entry: file.entry, record: record,
+        revision: Data(SHA256.hash(data: Data(file.box.utf8))).base64EncodedString())
     }.sorted { $0.ref < $1.ref }
     guard Set(result.map(\.ref)).count == result.count else {
       throw KagiError(.dataError, "库里有重复引用，可能发生了多设备冲突。请先保留冲突文件并人工核对。")
+    }
+    let validSpaces = Set(try spaces().map(\.id))
+    guard result.allSatisfy({ validSpaces.contains($0.record.metadata.space) }) else {
+      throw KagiError(.dataError, "条目引用了缺失的 Space，请先确认目录同步完成。")
     }
     if validateEntries {
       guard Set(try store.entryIDs()) == Set(result.map(\.entry)) else {
@@ -286,8 +305,8 @@ public final class Session {
     return result
   }
 
-  public func find(_ ref: Ref) throws -> Listing? {
-    try listings().first { $0.ref == ref.path }
+  public func find(_ ref: Ref, includeArchived: Bool = false) throws -> Listing? {
+    try listings(includeArchived: includeArchived).first { $0.ref == ref.path }
   }
 
   // MARK: 值（弹框）
@@ -313,64 +332,101 @@ public final class Session {
   }
 
   /// 读一条的最新版本。
-  public func read(_ listing: Listing, key: SymmetricKey) throws -> (version: Int, value: Data) {
-    guard let version = try store.versions(of: listing.entry).last else {
-      throw KagiError(.dataError, "\(listing.ref) 在库里没有任何版本的文件，可能还没同步下来。")
+  public func read(_ listing: Listing, key: SymmetricKey, kind: CredentialKind = .secret) throws
+    -> (version: Int, value: Data)
+  {
+    guard listing.record.kind == kind else { throw KagiError(.usage, "凭据类型不匹配，不能作为普通 key 读取。") }
+    return try store.withWriteLock {
+      guard
+        let current = try checkedListings(validateEntries: true).first(where: {
+          $0.entry == listing.entry
+        }),
+        !current.record.metadata.archived
+      else { throw KagiError(.notFound, "此 key 已归档或不存在，请先核对。") }
+      guard current.record == listing.record, current.revision == listing.revision else {
+        throw KagiError(.tempFail, "确认期间条目已变化，请重新核对后请求使用。")
+      }
+      guard let version = try store.versions(of: listing.entry).last else {
+        throw KagiError(.dataError, "\(listing.ref) 在库里没有任何版本的文件，可能还没同步下来。")
+      }
+      let file = try store.readEntry(listing.entry, version: version)
+      guard file.vault == vault.vault else {
+        throw KagiError(.dataError, "\(listing.ref) 的文件不属于这个库。")
+      }
+      let binding = Binding.entry(
+        vault: vault.vault, entry: listing.entry, version: version, created: file.created,
+        format: file.format)
+      let plainData: Data
+      do {
+        plainData = try Crypto.open(file.box, key: key, binding: binding)
+      } catch {
+        throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版解不开，可能被改过。")
+      }
+      let plain = try JSON.decode(
+        EntryPlain.self, from: plainData, file: "\(listing.ref) 第 \(version) 版")
+      guard plain.ref == listing.ref, plain.kind == kind,
+        (file.format == Format.typedEntry) == (plain.kind != .secret),
+        let value = Data(base64Encoded: plain.value)
+      else {
+        throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版里写的是别的条目，可能被调换过。")
+      }
+      return (version, value)
     }
-    let file = try store.readEntry(listing.entry, version: version)
-    guard file.vault == vault.vault else {
-      throw KagiError(.dataError, "\(listing.ref) 的文件不属于这个库。")
-    }
-    let binding = Binding.entry(
-      vault: vault.vault, entry: listing.entry, version: version, created: file.created)
-    let plainData: Data
-    do {
-      plainData = try Crypto.open(file.box, key: key, binding: binding)
-    } catch {
-      throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版解不开，可能被改过。")
-    }
-    let plain = try JSON.decode(
-      EntryPlain.self, from: plainData, file: "\(listing.ref) 第 \(version) 版")
-    guard plain.ref == listing.ref, let value = Data(base64Encoded: plain.value) else {
-      throw KagiError(.dataError, "\(listing.ref) 的第 \(version) 版里写的是别的条目，可能被调换过。")
-    }
-    return (version, value)
   }
 
   /// 存一个新版本。新条目从第 1 版开始；已有的条目在最新版本上加一，旧版本不删。
   @discardableResult
   public func write(
-    ref: Ref, value: Data, issuer: String?, usedIn: String?, existing: Listing?, key: SymmetricKey
+    ref: Ref, value: Data, issuer: String?, usedIn: String?, existing: Listing?, key: SymmetricKey,
+    metadata: KeyMetadata? = nil, kind: CredentialKind = .secret
   ) throws -> Int {
+    try requireSecret(key)
+    switch kind {
+    case .secret: break
+    case .totp: _ = try JSON.decode(TOTPCredential.self, from: value, file: "TOTP 凭据").code(at: 0)
+    case .passkey:
+      try JSON.decode(PasskeyCredential.self, from: value, file: "Passkey 凭据").validate()
+    }
+    let metadata = try (metadata ?? existing?.record.metadata ?? KeyMetadata()).normalized()
     return try store.withWriteLock {
-      let current = try find(ref)
-      guard current?.entry == existing?.entry, current?.record == existing?.record else {
+      let current = try find(ref, includeArchived: true)
+      guard current == nil || current?.record.kind == kind else {
+        throw KagiError(.usage, "不能改变已有凭据的类型。")
+      }
+      guard kind != .passkey || current == nil else {
+        throw KagiError(.usage, "已注册的 Passkey 不能覆盖，请使用新的引用注册。")
+      }
+      guard current?.record.metadata.archived != true, !metadata.archived else {
+        throw KagiError(.usage, "此 key 已归档，请先恢复后再更新值。")
+      }
+      guard try spaces().contains(where: { $0.id == metadata.space }) else {
+        throw KagiError(.notFound, "没有 Space \(metadata.space)。")
+      }
+      guard current?.entry == existing?.entry, current?.record == existing?.record,
+        current?.revision == existing?.revision else {
         throw KagiError(.tempFail, "确认期间条目已被另一个写入修改，什么都没存。请核对后重新运行。")
       }
       let entry = existing?.entry ?? Base32.encode(Crypto.randomBytes(10)).lowercased()
       let latest = try store.versions(of: entry).last ?? 0
       let version = latest + 1
       let created = Timestamp.now()
-      let plain = try JSON.encode(EntryPlain(ref: ref.path, value: value.base64EncodedString()))
+      let format = kind == .secret ? Format.entry : Format.typedEntry
+      let plain = try JSON.encode(
+        EntryPlain(ref: ref.path, value: value.base64EncodedString(), kind: kind))
       let file = EntryFile(
-        format: Format.entry, vault: vault.vault, entry: entry, version: version, created: created,
+        format: format, vault: vault.vault, entry: entry, version: version, created: created,
         box: try Crypto.seal(
           plain, key: key,
           binding: Binding.entry(
-            vault: vault.vault, entry: entry, version: version, created: created)))
+            vault: vault.vault, entry: entry, version: version, created: created, format: format)))
       try store.writeEntry(file)
 
       let record = IndexRecord(
         ref: ref.path, issuer: issuer ?? existing?.record.issuer,
         usedIn: usedIn ?? existing?.record.usedIn,
-        created: existing?.record.created ?? created, updated: created, latestVersion: version)
-      let indexKey = try indexKey()
-      try store.writeIndex(
-        IndexFile(
-          format: Format.index, vault: vault.vault, entry: entry,
-          box: try Crypto.seal(
-            try JSON.encode(record), key: indexKey,
-            binding: Binding.index(vault: vault.vault, entry: entry))))
+        created: existing?.record.created ?? created, updated: created, latestVersion: version,
+        metadata: metadata, kind: kind)
+      try saveIndex(entry: entry, record: record)
       return version
     }
   }
@@ -395,14 +451,21 @@ public final class Session {
         let plain = try Crypto.open(
           file.box, key: key,
           binding: Binding.entry(
-            vault: vault.vault, entry: id, version: version, created: file.created))
+            vault: vault.vault, entry: id, version: version, created: file.created,
+            format: file.format))
         let value = try JSON.decode(EntryPlain.self, from: plain, file: id)
         _ = try Ref(value.ref)
-        guard Data(base64Encoded: value.value) != nil, refs.insert(value.ref).inserted else {
+        guard Data(base64Encoded: value.value) != nil, refs.insert(value.ref).inserted,
+          (file.format == Format.typedEntry) == (value.kind != .secret)
+        else {
           throw KagiError(.dataError, "条目损坏或引用重复，索引没有修改。")
         }
         let prior = oldByEntry[id]
-        guard prior == nil || (prior!.ref == value.ref && prior!.latestVersion <= version) else {
+        guard
+          prior == nil
+            || (prior!.ref == value.ref && prior!.latestVersion <= version
+              && prior!.kind == value.kind)
+        else {
           throw KagiError(.dataError, "条目与旧索引不一致，可能缺少新版本。索引没有修改。")
         }
         records.append(
@@ -410,18 +473,15 @@ public final class Session {
             id,
             IndexRecord(
               ref: value.ref, issuer: prior?.issuer, usedIn: prior?.usedIn,
-              created: prior?.created ?? file.created, updated: file.created, latestVersion: version
+              created: prior?.created ?? file.created,
+              updated: (prior?.latestVersion == version ? prior?.updated : nil) ?? file.created,
+              latestVersion: version,
+              metadata: prior?.metadata ?? KeyMetadata(archived: true), kind: value.kind
             )
           ))
       }
-      let index = try indexKey()
       for (id, record) in records {
-        try store.writeIndex(
-          IndexFile(
-            format: Format.index, vault: vault.vault, entry: id,
-            box: try Crypto.seal(
-              try JSON.encode(record), key: index,
-              binding: Binding.index(vault: vault.vault, entry: id))))
+        try saveIndex(entry: id, record: record)
       }
       return records.count
     }

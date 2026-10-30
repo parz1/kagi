@@ -114,7 +114,7 @@ guard let entryNames = try? fm.contentsOfDirectory(atPath: entriesDir.path) else
   fail("读不了 entries 目录")
 }
 let entryIDs = entryNames.filter { !$0.hasPrefix(".") }.sorted()
-var exports: [(path: String, ref: String, value: Data)] = []
+var exports: [(path: String, ref: String, kind: String, value: Data)] = []
 for entryID in entryIDs {
   guard entryID.count == 16, entryID.allSatisfy({ "0123456789abcdefghjkmnpqrstvwxyz".contains($0) })
   else {
@@ -138,15 +138,21 @@ for entryID in entryIDs {
     (file["version"] as? Int) == version
   else { fail("entries/\(entryID)/\(name) 和它的位置对不上") }
   let created = string(file, "created", name)
+  let format = string(file, "format", name)
+  guard ["kagi-entry/1", "kagi-entry/2"].contains(format) else { fail("不支持的值格式") }
   guard
     let plain = open(
       string(file, "box", name), vaultKey,
-      "kagi-entry/1|\(vaultID)|\(entryID)|\(version)|\(created)"),
+      "\(format)|\(vaultID)|\(entryID)|\(version)|\(created)"),
     let object = try? JSONSerialization.jsonObject(with: plain) as? [String: Any],
     let ref = object["ref"] as? String, let valueText = object["value"] as? String,
     let value = Data(base64Encoded: valueText)
   else { fail("entries/\(entryID)/\(name) 解不开，可能被改过") }
 
+  let kind = object["kind"] as? String ?? "secret"
+  guard ["secret", "totp", "passkey"].contains(kind),
+    (format == "kagi-entry/2") == (kind != "secret")
+  else { fail("凭据格式或类型不匹配") }
   let segments = ref.split(separator: "/", omittingEmptySubsequences: false)
   guard !ref.isEmpty, ref.count <= 200,
     segments.allSatisfy({ segment in
@@ -160,7 +166,7 @@ for entryID in entryIDs {
   else { fail("条目引用名不合法：\(entryID)") }
   // 每个条目独立目录，避免 foo 与 foo.txt、大小写和目录前缀导致的覆盖。
   let outputName = String(segments.last!)
-  exports.append((entryID + "/" + outputName, ref, value))
+  exports.append((entryID + "/" + outputName, ref, kind, value))
 }
 
 // 所有条目验证完毕才写明文。目标文件绝不覆盖。
@@ -178,7 +184,7 @@ for item in exports {
   try handle.write(contentsOf: item.value)
   try handle.close()
 }
-let manifest = exports.map { ["ref": $0.ref, "file": $0.path] }
+let manifest = exports.map { ["ref": $0.ref, "file": $0.path, "kind": $0.kind] }
 let manifestData = try JSONSerialization.data(
   withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
 try manifestData.write(
