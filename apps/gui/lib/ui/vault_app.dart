@@ -1,20 +1,15 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/client.dart';
 import '../core/controller.dart';
 
+part 'theme.dart';
 part 'dialogs.dart';
 part 'components.dart';
-
-const ink = Color(0xFF1F2933);
-const muted = Color(0xFF5F6C76);
-const accent = Color(0xFF1E6470);
-const line = Color(0xFFDDE2E5);
-const rail = Color(0xFFF2F4F5);
-const selection = Color(0xFFE7F0F1);
 
 class VaultHome extends StatefulWidget {
   final VaultController controller;
@@ -32,6 +27,7 @@ class VaultHome extends StatefulWidget {
 
 class _VaultHomeState extends State<VaultHome> {
   VaultController get c => widget.controller;
+  KagiPalette get p => context.kp;
   final search = TextEditingController();
   final searchFocus = FocusNode();
   String kind = 'all';
@@ -65,6 +61,15 @@ class _VaultHomeState extends State<VaultHome> {
     return result;
   }
 
+  Map<String, int> get kindCounts {
+    final visible = c.visibleKeys;
+    return {
+      'all': visible.length,
+      for (final k in ['secret', 'totp', 'passkey'])
+        k: visible.where((item) => item.kind == k).length,
+    };
+  }
+
   KeyItem? get selected =>
       items.where((item) => item.ref == c.selectedRef).firstOrNull;
   String get sectionTitle => c.archived
@@ -76,6 +81,11 @@ class _VaultHomeState extends State<VaultHome> {
                 ?.name ??
             'Space'
       : '所有条目';
+  bool get filtered =>
+      c.selectedSpace != null ||
+      c.selectedTag != null ||
+      c.query.isNotEmpty ||
+      kind != 'all';
 
   @override
   void dispose() {
@@ -89,11 +99,29 @@ class _VaultHomeState extends State<VaultHome> {
     final ok = await task;
     if (!mounted) return;
     final message = ok ? success : c.error;
-    if (message != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    if (message != null) toast(message, error: !ok);
+  }
+
+  void toast(String message, {bool error = false}) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(
+                error ? Icons.error_outline : Icons.check_circle_outline,
+                size: 17,
+                color: error
+                    ? const Color(0xFFFF8A80)
+                    : const Color(0xFF8FE3B5),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
       );
-    }
   }
 
   void navigate({String? space, String? tag, bool archived = false}) {
@@ -118,12 +146,26 @@ class _VaultHomeState extends State<VaultHome> {
       PageRouteBuilder<void>(
         transitionDuration: MediaQuery.disableAnimationsOf(context)
             ? Duration.zero
-            : const Duration(milliseconds: 120),
+            : const Duration(milliseconds: 160),
         reverseTransitionDuration: MediaQuery.disableAnimationsOf(context)
             ? Duration.zero
-            : const Duration(milliseconds: 120),
-        transitionsBuilder: (context, animation, secondary, child) =>
-            FadeTransition(opacity: animation, child: child),
+            : const Duration(milliseconds: 140),
+        transitionsBuilder: (context, animation, secondary, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          return FadeTransition(
+            opacity: curved,
+            child: SlideTransition(
+              position: Tween(
+                begin: const Offset(.06, 0),
+                end: Offset.zero,
+              ).animate(curved),
+              child: child,
+            ),
+          );
+        },
         pageBuilder: (context, animation, secondary) => ListenableBuilder(
           listenable: c,
           builder: (context, _) {
@@ -152,11 +194,17 @@ class _VaultHomeState extends State<VaultHome> {
                       onPressed: c.lock,
                       icon: const Icon(Icons.lock_outline, size: 20),
                     ),
+                  const SizedBox(width: 4),
                 ],
               ),
               body: c.current?.status == 'ready' && current != null
                   ? inspector(current, phone: true)
-                  : const Center(child: Text('保险库已锁定，请返回解锁。')),
+                  : Center(
+                      child: Text(
+                        '保险库已锁定，请返回解锁。',
+                        style: TextStyle(color: context.kp.muted),
+                      ),
+                    ),
             );
           },
         ),
@@ -169,7 +217,8 @@ class _VaultHomeState extends State<VaultHome> {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: c,
     builder: (context, _) {
-      final desktop = MediaQuery.sizeOf(context).width >= 980;
+      final width = MediaQuery.sizeOf(context).width;
+      final desktop = width >= 980;
       final status = c.current?.status;
       return CallbackShortcuts(
         bindings: {
@@ -197,7 +246,8 @@ class _VaultHomeState extends State<VaultHome> {
         child: Focus(
           autofocus: true,
           child: Scaffold(
-            appBar: desktop
+            backgroundColor: p.canvas,
+            appBar: desktop || status != 'ready'
                 ? null
                 : AppBar(
                     titleSpacing: 0,
@@ -205,38 +255,42 @@ class _VaultHomeState extends State<VaultHome> {
                       children: [
                         const _Brand(compact: true),
                         const SizedBox(width: 10),
-                        _ModeMark(
-                          c.current?.mode ??
-                              (c.client.isDemo ? 'fake' : 'native'),
-                        ),
+                        backendMenu(),
                       ],
                     ),
                     actions: [
-                      backendMenu(),
                       IconButton(
                         tooltip: '同步与冲突',
-                        onPressed: status == 'ready' && canSync
-                            ? syncDialog
-                            : null,
-                        icon: const Icon(Icons.sync_outlined, size: 20),
+                        onPressed: canSync ? syncDialog : null,
+                        icon: Badge(
+                          isLabelVisible: c.conflicts.isNotEmpty,
+                          backgroundColor: p.danger,
+                          smallSize: 7,
+                          child: const Icon(Icons.sync_rounded, size: 20),
+                        ),
                       ),
                       IconButton(
                         tooltip: '锁定保险库',
-                        onPressed: status == 'ready' ? c.lock : null,
+                        onPressed: c.lock,
                         icon: const Icon(Icons.lock_outline, size: 20),
                       ),
+                      const SizedBox(width: 4),
                     ],
                   ),
             drawer: !desktop && status == 'ready'
                 ? Drawer(
-                    width: 260,
+                    width: 280,
                     child: SafeArea(child: sidebar(phone: true)),
                   )
                 : null,
             body: status == null
                 ? c.error == null
                       ? const Center(
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          child: SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
                         )
                       : stateView('error')
                 : status != 'ready'
@@ -246,14 +300,14 @@ class _VaultHomeState extends State<VaultHome> {
                     children: [
                       SizedBox(
                         key: const Key('vault-sidebar'),
-                        width: 172,
+                        width: 232,
                         child: sidebar(),
                       ),
-                      const VerticalDivider(width: 1),
+                      VerticalDivider(width: 1, color: p.line),
                       Expanded(child: tablePanel()),
-                      const VerticalDivider(width: 1),
+                      VerticalDivider(width: 1, color: p.line),
                       SizedBox(
-                        width: 300,
+                        width: width >= 1200 ? 360 : 320,
                         child: selected == null
                             ? emptyInspector()
                             : inspector(selected!),
@@ -270,7 +324,7 @@ class _VaultHomeState extends State<VaultHome> {
   Widget backendMenu() => PopupMenuButton<bool>(
     tooltip: '选择保险库',
     onSelected: widget.onBackend,
-    icon: const Icon(Icons.unfold_more, size: 17),
+    position: PopupMenuPosition.under,
     itemBuilder: (_) => [
       CheckedPopupMenuItem(
         value: true,
@@ -284,6 +338,17 @@ class _VaultHomeState extends State<VaultHome> {
           child: const Text('本机保险库'),
         ),
     ],
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ModeMark(c.current?.mode ?? (c.client.isDemo ? 'fake' : 'native')),
+          const SizedBox(width: 2),
+          Icon(Icons.unfold_more_rounded, size: 15, color: p.faint),
+        ],
+      ),
+    ),
   );
 
   Widget sidebar({bool phone = false}) {
@@ -292,15 +357,16 @@ class _VaultHomeState extends State<VaultHome> {
       if (phone) Navigator.pop(context);
     }
 
+    final keys = c.current!.keys;
     return Material(
-      color: rail,
+      color: p.sidebar,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(
-            height: 48,
+            height: 60,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.fromLTRB(18, 0, 12, 0),
               child: Row(
                 children: [
                   const _Brand(),
@@ -310,46 +376,58 @@ class _VaultHomeState extends State<VaultHome> {
               ),
             ),
           ),
-          const Divider(height: 1),
-          const SizedBox(height: 10),
-          navTile(
-            '所有条目',
-            Icons.apps_outlined,
-            c.selectedSpace == null && c.selectedTag == null && !c.archived,
-            () => go(),
-            count: c.current!.keys.where((k) => !k.metadata.archived).length,
-            phone: phone,
-          ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(0, 12, 0, 8),
+              padding: const EdgeInsets.fromLTRB(0, 4, 0, 12),
               children: [
+                navTile(
+                  '所有条目',
+                  Icon(Icons.layers_outlined, size: 17, color: p.muted),
+                  c.selectedSpace == null &&
+                      c.selectedTag == null &&
+                      !c.archived,
+                  () => go(),
+                  count: keys.where((k) => !k.metadata.archived).length,
+                  phone: phone,
+                ),
+                navTile(
+                  '已归档',
+                  Icon(Icons.inventory_2_outlined, size: 17, color: p.muted),
+                  c.archived,
+                  () => go(archived: true),
+                  phone: phone,
+                  count: keys.where((k) => k.metadata.archived).length,
+                ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 3, 8, 6),
+                  padding: const EdgeInsets.fromLTRB(20, 18, 10, 4),
                   child: Row(
                     children: [
                       const Expanded(child: _Label('Space')),
                       _ToolIcon(
                         key: const Key('add-space'),
                         label: '新建 Space',
-                        icon: Icons.add,
+                        icon: Icons.add_rounded,
+                        size: 16,
                         onPressed: canManage ? spaceDialog : null,
                       ),
                     ],
                   ),
                 ),
-                for (final space in c.current!.spaces)
+                for (final (index, space) in c.current!.spaces.indexed)
                   navTile(
                     space.name,
-                    space.id == 'default'
-                        ? Icons.person_outline
-                        : space.id == 'work'
-                        ? Icons.work_outline
-                        : Icons.science_outlined,
+                    Container(
+                      width: 9,
+                      height: 9,
+                      decoration: BoxDecoration(
+                        color: _indexed(index, dark: p.isDark),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ),
                     c.selectedSpace == space.id && !c.archived,
                     () => go(space: space.id),
                     phone: phone,
-                    count: c.current!.keys
+                    count: keys
                         .where(
                           (k) =>
                               k.metadata.space == space.id &&
@@ -360,7 +438,8 @@ class _VaultHomeState extends State<VaultHome> {
                       tooltip: '管理 ${space.name}',
                       enabled: canManage,
                       padding: EdgeInsets.zero,
-                      iconSize: 14,
+                      position: PopupMenuPosition.under,
+                      icon: Icon(Icons.more_horiz, size: 15, color: p.faint),
                       onSelected: (value) => value == 'rename'
                           ? spaceDialog(space)
                           : action(
@@ -380,73 +459,75 @@ class _VaultHomeState extends State<VaultHome> {
                       ],
                     ),
                   ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 20, 8, 8),
-                  child: _Label('标签'),
-                ),
-                for (final tag in c.tags)
-                  navTile(
-                    tag,
-                    Icons.tag,
-                    c.selectedTag == tag,
-                    () => go(tag: tag),
-                    phone: phone,
-                    compact: true,
+                if (c.tags.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 18, 10, 8),
+                    child: _Label('标签'),
                   ),
-                const SizedBox(height: 14),
-                navTile(
-                  '已归档',
-                  Icons.archive_outlined,
-                  c.archived,
-                  () => go(archived: true),
-                  phone: phone,
-                  count: c.current!.keys
-                      .where((k) => k.metadata.archived)
-                      .length,
-                ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Wrap(
+                      spacing: 5,
+                      runSpacing: 5,
+                      children: [
+                        for (final tag in c.tags) tagChip(tag, go, phone),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-          const Divider(height: 1),
+          Divider(height: 1, color: p.line),
+          const SizedBox(height: 6),
           navTile(
             '同步与冲突',
-            Icons.sync_outlined,
+            Icon(Icons.sync_rounded, size: 17, color: p.muted),
             false,
             canSync ? syncDialog : null,
             phone: phone,
             count: c.conflicts.isEmpty ? null : c.conflicts.length,
+            alert: c.conflicts.isNotEmpty,
           ),
-          navTile('锁定保险库', Icons.lock_outline, false, c.lock, phone: phone),
-          const Divider(height: 1),
+          navTile(
+            '锁定保险库',
+            Icon(Icons.lock_outline_rounded, size: 17, color: p.muted),
+            false,
+            c.lock,
+            phone: phone,
+            trailing: phone
+                ? null
+                : Text('⇧⌘L', style: TextStyle(fontSize: 11, color: p.faint)),
+          ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            padding: const EdgeInsets.fromLTRB(20, 8, 10, 12),
             child: Row(
               children: [
-                Container(
-                  width: 6,
-                  height: 6,
-                  decoration: const BoxDecoration(
-                    color: accent,
-                    shape: BoxShape.circle,
-                  ),
+                Icon(
+                  c.client.isDemo
+                      ? Icons.science_outlined
+                      : Icons.verified_user_outlined,
+                  size: 14,
+                  color: p.faint,
                 ),
                 const SizedBox(width: 7),
                 Expanded(
                   child: Text(
                     c.client.isDemo
-                        ? '演示保险库'
+                        ? '演示保险库 · 虚构数据'
                         : c.current?.mode == 'software'
                         ? 'Swift 测试保险库'
-                        : '本机保险库',
+                        : '本机保险库 · 已加密',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: muted),
+                    style: TextStyle(fontSize: 11.5, color: p.faint),
                   ),
                 ),
                 if (c.client.isDemo)
                   _ToolIcon(
                     label: '模拟验证',
-                    icon: Icons.tune,
+                    icon: Icons.tune_rounded,
+                    size: 15,
                     onPressed: fakeDialog,
                   ),
               ],
@@ -457,59 +538,110 @@ class _VaultHomeState extends State<VaultHome> {
     );
   }
 
+  Widget tagChip(
+    String tag,
+    void Function({String? space, String? tag, bool archived}) go,
+    bool phone,
+  ) {
+    final active = c.selectedTag == tag;
+    return Material(
+      color: active ? p.accent : p.canvas.withValues(alpha: p.isDark ? .4 : .9),
+      borderRadius: BorderRadius.circular(7),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(7),
+        onTap: () => go(tag: tag),
+        child: Container(
+          constraints: BoxConstraints(minHeight: phone ? 36 : 26),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: active ? p.accent : p.line),
+          ),
+          child: Text(
+            '#$tag',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              color: active ? p.onAccent : p.muted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget navTile(
     String title,
-    IconData icon,
+    Widget leading,
     bool active,
     VoidCallback? onTap, {
     int? count,
     Widget? menu,
+    Widget? trailing,
     bool phone = false,
-    bool compact = false,
+    bool alert = false,
   }) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
     child: Material(
-      color: active ? selection : Colors.transparent,
-      borderRadius: BorderRadius.circular(5),
+      color: active ? p.selection : Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(5),
+        borderRadius: BorderRadius.circular(8),
         child: SizedBox(
-          height: phone
-              ? 44
-              : compact
-              ? 27
-              : 32,
+          height: phone ? 44 : 34,
           child: Padding(
-            padding: const EdgeInsets.only(left: 9, right: 5),
+            padding: const EdgeInsets.only(left: 10, right: 6),
             child: Row(
               children: [
-                Icon(
-                  icon,
-                  size: compact ? 13 : 16,
-                  color: active ? accent : muted,
+                SizedBox(
+                  width: 18,
+                  child: Center(
+                    child: IconTheme.merge(
+                      data: IconThemeData(color: active ? p.accent : p.muted),
+                      child: leading,
+                    ),
+                  ),
                 ),
-                const SizedBox(width: 9),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     title,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: phone ? 14 : 12,
-                      color: active ? accent : ink,
-                      fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                      fontSize: phone ? 15 : 13,
+                      color: active ? p.accent : p.ink,
+                      fontWeight: active ? FontWeight.w600 : FontWeight.w500,
                     ),
                   ),
                 ),
+                ?trailing,
                 if (count != null)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
+                    decoration: alert
+                        ? BoxDecoration(
+                            color: p.danger,
+                            borderRadius: BorderRadius.circular(10),
+                          )
+                        : null,
                     child: Text(
                       '$count',
-                      style: const TextStyle(fontSize: 10, color: muted),
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w500,
+                        color: alert
+                            ? Colors.white
+                            : active
+                            ? p.accent
+                            : p.faint,
+                      ),
                     ),
                   ),
-                if (menu != null) SizedBox(width: 19, height: 24, child: menu),
+                if (menu != null) SizedBox(width: 24, height: 26, child: menu),
               ],
             ),
           ),
@@ -522,228 +654,230 @@ class _VaultHomeState extends State<VaultHome> {
     key: const Key('search'),
     controller: search,
     focusNode: searchFocus,
-    onChanged: c.search,
-    style: TextStyle(fontSize: phone ? 14 : 12),
+    onChanged: (value) {
+      c.search(value);
+      setState(() {});
+    },
+    style: TextStyle(fontSize: phone ? 15 : 13, color: p.ink),
     decoration: InputDecoration(
       hintText: phone ? '搜索名称、引用、标签' : '搜索条目',
-      prefixIcon: Icon(Icons.search, size: phone ? 19 : 16),
-      prefixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 32),
+      prefixIcon: Icon(Icons.search_rounded, size: phone ? 20 : 17),
+      prefixIconConstraints: const BoxConstraints(minWidth: 36, minHeight: 34),
       suffixIcon: search.text.isEmpty
-          ? null
+          ? (phone
+                ? null
+                : Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Text(
+                      '⌘F',
+                      style: TextStyle(fontSize: 11, color: p.faint),
+                    ),
+                  ))
           : IconButton(
               tooltip: '清除搜索',
-              icon: const Icon(Icons.close, size: 15),
+              icon: const Icon(Icons.cancel_rounded, size: 16),
               onPressed: () {
                 search.clear();
                 c.search('');
+                setState(() {});
               },
             ),
+      suffixIconConstraints: const BoxConstraints(minWidth: 28, minHeight: 28),
       contentPadding: EdgeInsets.symmetric(
         horizontal: 10,
-        vertical: phone ? 11 : 8,
+        vertical: phone ? 12 : 9,
       ),
     ),
   );
 
-  Widget addButton({bool phone = false}) => IconButton.filled(
-    key: const Key('add-key'),
-    tooltip: '添加条目',
-    onPressed: canManage ? () => editDialog() : null,
-    style: IconButton.styleFrom(
-      backgroundColor: accent,
-      foregroundColor: Colors.white,
-      minimumSize: Size.square(phone ? 44 : 30),
-      maximumSize: Size.square(phone ? 44 : 30),
-      padding: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
-    ),
-    icon: const Icon(Icons.add, size: 19),
-  );
-
-  Widget typeMenu() => SizedBox(
-    height: MediaQuery.sizeOf(context).width < 980 ? 44 : 30,
-    child: PopupMenuButton<String>(
-      tooltip: '筛选凭据类型',
-      initialValue: kind,
-      onSelected: chooseKind,
-      itemBuilder: (_) => [
-        for (final entry in const {
-          'all': '全部类型',
-          'secret': '密钥',
-          'totp': 'TOTP 验证器',
-          'passkey': 'Passkey',
-        }.entries)
-          CheckedPopupMenuItem(
-            key: Key('kind-${entry.key}'),
-            value: entry.key,
-            checked: entry.key == kind,
-            child: Text(entry.value),
+  Widget addButton({bool phone = false, bool compact = false}) =>
+      phone || compact
+      ? FilledButton(
+          key: const Key('add-key'),
+          onPressed: canManage ? () => editDialog() : null,
+          style: FilledButton.styleFrom(
+            minimumSize: Size.square(phone ? 44 : 34),
+            maximumSize: Size.square(phone ? 44 : 34),
+            padding: EdgeInsets.zero,
           ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.filter_list, size: 15, color: muted),
-            const SizedBox(width: 5),
-            Text(
-              kind == 'all' ? '全部类型' : kindLabel(kind),
-              style: const TextStyle(fontSize: 11, color: muted),
-            ),
-            const SizedBox(width: 3),
-            const Icon(Icons.expand_more, size: 13, color: muted),
-          ],
-        ),
-      ),
-    ),
-  );
+          child: Tooltip(
+            message: phone ? '添加条目' : '添加条目（⌘N）',
+            child: Icon(Icons.add_rounded, size: phone ? 22 : 19),
+          ),
+        )
+      : Tooltip(
+          message: '添加条目（⌘N）',
+          child: FilledButton.icon(
+            key: const Key('add-key'),
+            onPressed: canManage ? () => editDialog() : null,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('新建'),
+          ),
+        );
+
+  Widget sortButton({bool compact = false}) {
+    void toggle() => setState(() {
+      ascending = !ascending;
+    });
+    final icon = Icon(
+      ascending ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+      size: 14,
+    );
+    final label = ascending ? '名称 A–Z' : '名称 Z–A';
+    return compact
+        ? _ToolIcon(
+            label: '按$label排序',
+            icon: ascending
+                ? Icons.arrow_upward_rounded
+                : Icons.arrow_downward_rounded,
+            size: 15,
+            onPressed: toggle,
+          )
+        : TextButton.icon(
+            onPressed: toggle,
+            icon: icon,
+            label: Text(label, style: const TextStyle(fontSize: 12)),
+          );
+  }
 
   Widget tablePanel() => LayoutBuilder(
     builder: (context, constraints) {
       final columns = _Columns(constraints.maxWidth);
+      final list = items;
       return Material(
-        color: Colors.white,
+        color: p.canvas,
         child: Column(
           children: [
             SizedBox(
-              height: 48,
+              height: 64,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
+                padding: const EdgeInsets.fromLTRB(22, 0, 16, 0),
                 child: Row(
                   children: [
-                    Text(
-                      sectionTitle,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: ink,
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              sectionTitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 21,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -.3,
+                                color: p.ink,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 9),
+                          Text(
+                            '${list.length}',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                              color: p.faint,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${items.length}',
-                      style: const TextStyle(fontSize: 11, color: muted),
-                    ),
-                    const Spacer(),
+                    const SizedBox(width: 12),
                     SizedBox(
-                      width: (constraints.maxWidth * .38).clamp(140, 260),
-                      height: 32,
+                      width: (constraints.maxWidth * .4).clamp(140, 300),
+                      height: 34,
                       child: searchField(),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     _ToolIcon(
                       label: '刷新',
-                      icon: Icons.refresh,
+                      icon: Icons.refresh_rounded,
                       onPressed: c.busy ? null : () => action(c.load()),
                     ),
                     const SizedBox(width: 6),
-                    addButton(),
+                    addButton(compact: constraints.maxWidth < 560),
                   ],
                 ),
               ),
             ),
-            const Divider(height: 1),
-            SizedBox(
-              height: 34,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(
-                  children: [
-                    typeMenu(),
-                    const SizedBox(width: 8),
-                    const SizedBox(
-                      height: 12,
-                      child: VerticalDivider(width: 1),
-                    ),
-                    const SizedBox(width: 7),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(4),
-                      onTap: () => setState(() {
-                        ascending = !ascending;
-                      }),
-                      child: Padding(
-                        padding: const EdgeInsets.all(5),
-                        child: Row(
-                          children: [
-                            const Text(
-                              '名称',
-                              style: TextStyle(fontSize: 11, color: muted),
-                            ),
-                            const SizedBox(width: 3),
-                            Icon(
-                              ascending
-                                  ? Icons.arrow_upward
-                                  : Icons.arrow_downward,
-                              size: 12,
-                              color: muted,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 14, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _KindFilter(
+                            value: kind,
+                            counts: kindCounts,
+                            onChanged: chooseKind,
+                          ),
+                          if (c.selectedTag != null) ...[
+                            const SizedBox(width: 8),
+                            _Pill(
+                              '#${c.selectedTag}',
+                              icon: Icons.sell_outlined,
                             ),
                           ],
-                        ),
+                        ],
                       ),
                     ),
-                    if (c.selectedTag != null) ...[
-                      const SizedBox(width: 8),
-                      _Pill('# ${c.selectedTag}'),
-                    ],
-                    const Spacer(),
-                    if (c.selectedSpace != null ||
-                        c.selectedTag != null ||
-                        c.query.isNotEmpty ||
-                        kind != 'all')
-                      TextButton(
-                        onPressed: () => navigate(),
-                        child: const Text(
-                          '清除筛选',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                      ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 6),
+                  if (filtered)
+                    TextButton(
+                      onPressed: () => navigate(),
+                      child: const Text('清除筛选', style: TextStyle(fontSize: 12)),
+                    ),
+                  sortButton(compact: constraints.maxWidth < 600),
+                ],
               ),
             ),
-            if (c.busy) const LinearProgressIndicator(minHeight: 2),
-            Container(
-              height: 28,
-              decoration: const BoxDecoration(
-                color: rail,
-                border: Border(bottom: BorderSide(color: line)),
-              ),
-              child: _TableCells(columns: columns),
+            SizedBox(
+              height: 2,
+              child: c.busy
+                  ? const LinearProgressIndicator(minHeight: 2)
+                  : null,
             ),
+            Divider(height: 1, color: p.lineSoft),
             Expanded(
-              child: items.isEmpty
+              child: list.isEmpty
                   ? emptyList()
                   : ListView.builder(
                       key: const Key('key-table'),
-                      padding: EdgeInsets.zero,
-                      itemCount: items.length,
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      itemCount: list.length,
                       itemBuilder: (_, index) => _KeyRow(
-                        key: Key('item-${items[index].ref}'),
-                        item: items[index],
+                        key: Key('item-${list[index].ref}'),
+                        item: list[index],
                         columns: columns,
-                        selected: c.selectedRef == items[index].ref,
-                        onTap: () => openItem(items[index], false),
+                        selected: c.selectedRef == list[index].ref,
+                        onTap: () => openItem(list[index], false),
                       ),
                     ),
             ),
             Container(
-              height: 27,
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: line)),
+              height: 30,
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: p.lineSoft)),
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 22),
               child: Row(
                 children: [
-                  const Icon(
-                    Icons.offline_bolt_outlined,
-                    size: 12,
-                    color: muted,
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: p.success,
+                      shape: BoxShape.circle,
+                    ),
                   ),
-                  const SizedBox(width: 5),
-                  const Text(
+                  const SizedBox(width: 7),
+                  Text(
                     '离线可用',
-                    style: TextStyle(fontSize: 10, color: muted),
+                    style: TextStyle(fontSize: 11.5, color: p.faint),
                   ),
                   const Spacer(),
                   Text(
@@ -752,7 +886,7 @@ class _VaultHomeState extends State<VaultHome> {
                         : c.lastSync == null
                         ? '本地加密库'
                         : '同步已完成',
-                    style: const TextStyle(fontSize: 10, color: muted),
+                    style: TextStyle(fontSize: 11.5, color: p.faint),
                   ),
                 ],
               ),
@@ -763,537 +897,781 @@ class _VaultHomeState extends State<VaultHome> {
     },
   );
 
-  Widget phoneList() => Material(
-    color: Colors.white,
-    child: Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 6, 12, 8),
-          child: Row(
-            children: [
-              Text(
-                sectionTitle,
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.w600,
-                  color: ink,
-                ),
-              ),
-              const SizedBox(width: 7),
-              Text(
-                '${items.length}',
-                style: const TextStyle(fontSize: 12, color: muted),
-              ),
-              const Spacer(),
-              addButton(phone: true),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: searchField(phone: true),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Row(
-            children: [
-              typeMenu(),
-              if (c.selectedTag != null) _Pill('# ${c.selectedTag}'),
-              const Spacer(),
-              _ToolIcon(
-                label: '刷新',
-                icon: Icons.refresh,
-                onPressed: c.busy ? null : () => action(c.load()),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        if (c.busy) const LinearProgressIndicator(minHeight: 2),
-        Expanded(
-          child: items.isEmpty
-              ? emptyList()
-              : ListView.separated(
-                  padding: EdgeInsets.zero,
-                  itemCount: items.length,
-                  separatorBuilder: (_, _) => const Padding(
-                    padding: EdgeInsets.only(left: 52),
-                    child: Divider(height: 1),
-                  ),
-                  itemBuilder: (_, index) {
-                    final item = items[index];
-                    return InkWell(
-                      key: Key('item-${item.ref}'),
-                      onTap: () => openItem(item, true),
-                      child: SizedBox(
-                        height:
-                            58 *
-                            MediaQuery.textScalerOf(context).scale(14) /
-                            14,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            children: [
-                              _EntryIcon(item.kind, item.title, small: true),
-                              const SizedBox(width: 11),
-                              Expanded(
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      item.title,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontSize: 14,
-                                        color: ink,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 3),
-                                    Text(
-                                      item.ref,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontSize: 11,
-                                        color: muted,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                item.kind == 'secret'
-                                    ? ''
-                                    : kindLabel(item.kind),
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: muted,
-                                ),
-                              ),
-                              const SizedBox(width: 5),
-                              const Icon(
-                                Icons.chevron_right,
-                                size: 17,
-                                color: muted,
-                              ),
-                            ],
+  Widget phoneList() {
+    final list = items;
+    final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+    return Material(
+      color: p.canvas,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 12, 14, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          sectionTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -.5,
+                            color: p.ink,
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
-        ),
-      ],
-    ),
-  );
-
-  Widget emptyList() => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text('没有匹配的条目', style: TextStyle(fontSize: 13, color: ink)),
-          const SizedBox(height: 8),
-          if (c.query.isNotEmpty || kind != 'all' || c.selectedTag != null)
-            TextButton(onPressed: () => navigate(), child: const Text('清除筛选'))
-          else
-            TextButton(
-              onPressed: canManage ? () => editDialog() : null,
-              child: const Text('添加第一个条目'),
-            ),
-        ],
-      ),
-    ),
-  );
-  Widget emptyInspector() => const Center(
-    child: Padding(
-      padding: EdgeInsets.all(20),
-      child: Text('选择条目查看详情', style: TextStyle(fontSize: 12, color: muted)),
-    ),
-  );
-
-  Widget inspector(KeyItem item, {bool phone = false}) => Material(
-    color: Colors.white,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (!phone)
-          Container(
-            height: 48,
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            decoration: const BoxDecoration(
-              border: Border(bottom: BorderSide(color: line)),
-            ),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '条目详情',
-                    style: TextStyle(fontSize: 12, color: muted),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${list.length}',
+                        style: TextStyle(fontSize: 14, color: p.faint),
+                      ),
+                    ],
                   ),
                 ),
+                const SizedBox(width: 12),
+                addButton(phone: true),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: searchField(phone: true),
+          ),
+          SingleChildScrollView(
+            key: const Key('phone-filters'),
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+            child: Row(
+              children: [
+                _KindFilter(
+                  value: kind,
+                  counts: kindCounts,
+                  onChanged: chooseKind,
+                ),
+                if (c.selectedTag != null) ...[
+                  const SizedBox(width: 8),
+                  _Pill('#${c.selectedTag}', icon: Icons.sell_outlined),
+                ],
+                const SizedBox(width: 4),
                 _ToolIcon(
-                  label: '关闭详情',
-                  icon: Icons.close,
-                  onPressed: () => c.select(null),
+                  label: '刷新',
+                  icon: Icons.refresh_rounded,
+                  onPressed: c.busy ? null : () => action(c.load()),
                 ),
               ],
             ),
           ),
-        Expanded(
-          child: SingleChildScrollView(
-            padding: EdgeInsets.all(phone ? 18 : 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (!phone)
-                  Row(
-                    children: [
-                      _EntryIcon(item.kind, item.title, small: true),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Text(
-                          item.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 17,
-                            height: 1.25,
-                            fontWeight: FontWeight.w600,
-                            color: ink,
+          SizedBox(
+            height: 2,
+            child: c.busy ? const LinearProgressIndicator(minHeight: 2) : null,
+          ),
+          Divider(height: 1, color: p.lineSoft),
+          Expanded(
+            child: list.isEmpty
+                ? emptyList()
+                : ListView.separated(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    itemCount: list.length,
+                    separatorBuilder: (_, _) =>
+                        Divider(height: 1, indent: 70, color: p.lineSoft),
+                    itemBuilder: (_, index) {
+                      final item = list[index];
+                      return InkWell(
+                        key: Key('item-${item.ref}'),
+                        onTap: () => openItem(item, true),
+                        child: SizedBox(
+                          height: 66 * scale,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              children: [
+                                _Avatar(item.kind, item.title, size: 40),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        item.title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 15,
+                                          color: p.ink,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        item.ref,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: mono(12, p.muted),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (item.kind != 'secret') ...[
+                                  const SizedBox(width: 8),
+                                  _Pill(kindShort(item.kind)),
+                                ],
+                                const SizedBox(width: 6),
+                                Icon(
+                                  Icons.chevron_right_rounded,
+                                  size: 20,
+                                  color: p.faint,
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      );
+                    },
                   ),
-                if (!phone) const SizedBox(height: 10),
-                SelectableText(
-                  item.ref,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    color: muted,
-                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget emptyState(
+    IconData icon,
+    String title,
+    String? subtitle,
+    Widget? cta,
+  ) => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(color: p.field, shape: BoxShape.circle),
+            child: Icon(icon, size: 24, color: p.faint),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: p.ink,
+            ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, color: p.muted, height: 1.5),
+            ),
+          ],
+          if (cta != null) ...[const SizedBox(height: 14), cta],
+        ],
+      ),
+    ),
+  );
+
+  Widget emptyList() =>
+      c.query.isNotEmpty || kind != 'all' || c.selectedTag != null
+      ? emptyState(
+          Icons.search_off_rounded,
+          '没有匹配的条目',
+          '换个关键词，或清除筛选条件。',
+          OutlinedButton(
+            onPressed: () => navigate(),
+            child: const Text('清除筛选'),
+          ),
+        )
+      : emptyState(
+          c.archived ? Icons.inventory_2_outlined : Icons.key_rounded,
+          c.archived ? '没有归档的条目' : '这里还没有条目',
+          c.archived ? '归档的条目会保留密文与历史版本。' : '值只在你确认后才会被使用。',
+          c.archived
+              ? null
+              : FilledButton.icon(
+                  onPressed: canManage ? () => editDialog() : null,
+                  icon: const Icon(Icons.add_rounded, size: 18),
+                  label: const Text('添加第一个条目'),
                 ),
-                const SizedBox(height: 18),
-                Container(
-                  padding: EdgeInsets.all(phone ? 14 : 12),
-                  decoration: const BoxDecoration(
-                    color: rail,
-                    border: Border(left: BorderSide(color: accent, width: 2)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              item.kind == 'totp'
-                                  ? '一次性验证码'
-                                  : item.kind == 'passkey'
-                                  ? '通行密钥'
-                                  : '密钥值',
-                              style: TextStyle(fontSize: 11, color: muted),
-                            ),
-                          ),
-                          const Icon(
-                            Icons.lock_outline,
-                            size: 12,
-                            color: muted,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      if (item.kind == 'totp' &&
-                          c.otpRef == item.ref &&
-                          c.otp != null)
-                        _OTPDisplay(code: c.otp!, demo: c.client.isDemo)
-                      else
-                        Text(
-                          item.kind == 'passkey'
-                              ? '私钥不可导出'
-                              : item.kind == 'totp'
-                              ? '••• •••'
-                              : '••••••••••••',
-                          maxLines: 1,
-                          overflow: TextOverflow.clip,
-                          style: TextStyle(
-                            fontSize: item.kind == 'passkey' ? 13 : 21,
-                            letterSpacing: item.kind == 'passkey' ? 0 : 2,
-                            color: ink,
-                          ),
+        );
+
+  Widget emptyInspector() => Material(
+    color: p.panel,
+    child: emptyState(
+      Icons.touch_app_outlined,
+      '选择条目查看详情',
+      '⌘F 搜索 · ⌘N 新建 · ⇧⌘L 锁定',
+      null,
+    ),
+  );
+
+  Widget inspector(KeyItem item, {bool phone = false}) {
+    final caps = c.current!.capabilities;
+    final spaceName =
+        c.current!.spaces
+            .where((s) => s.id == item.metadata.space)
+            .firstOrNull
+            ?.name ??
+        item.metadata.space;
+    final valueStyle = TextStyle(fontSize: phone ? 15 : 13, color: p.ink);
+    final showingCode =
+        item.kind == 'totp' && c.otpRef == item.ref && c.otp != null;
+    final usable =
+        !c.busy &&
+        !item.metadata.archived &&
+        (item.kind == 'totp' ? caps.totp : caps.copySecret);
+    return Material(
+      color: phone ? p.canvas : p.panel,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!phone)
+            SizedBox(
+              height: 52,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 10, 0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '条目详情',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: p.faint,
                         ),
-                      const SizedBox(height: 12),
-                      if (item.kind == 'passkey')
-                        const Text(
-                          '系统提供者尚未接入',
-                          style: TextStyle(fontSize: 11, color: muted),
-                        )
-                      else
-                        Row(
+                      ),
+                    ),
+                    _ToolIcon(
+                      label: '关闭详情',
+                      icon: Icons.close_rounded,
+                      onPressed: () => c.select(null),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(20, phone ? 20 : 4, 20, 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _Avatar(item.kind, item.title, size: 52),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: Text(
-                                c.client.isDemo ? '模拟验证' : '操作时验证',
-                                style: TextStyle(fontSize: 10, color: muted),
-                              ),
-                            ),
-                            FilledButton.icon(
-                              key: const Key('use-key'),
-                              onPressed:
-                                  c.busy ||
-                                      item.metadata.archived ||
-                                      (item.kind == 'totp'
-                                          ? !c.current!.capabilities.totp
-                                          : !c.current!.capabilities.copySecret)
-                                  ? null
-                                  : () => action(
-                                      item.kind == 'totp'
-                                          ? c.generateOTP(item)
-                                          : c.copy(item),
-                                      item.kind == 'totp'
-                                          ? null
-                                          : c.client.isDemo
-                                          ? '已复制演示值，30 秒后清除'
-                                          : '已复制，30 秒后自动清除',
-                                    ),
-                              style: FilledButton.styleFrom(
-                                minimumSize: Size(0, phone ? 44 : 30),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
+                            if (!phone)
+                              Text(
+                                item.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 19,
+                                  height: 1.25,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: -.2,
+                                  color: p.ink,
                                 ),
                               ),
-                              icon: Icon(
-                                item.kind == 'totp'
-                                    ? Icons.fingerprint
-                                    : Icons.content_copy_outlined,
-                                size: 14,
-                              ),
-                              label: Text(item.kind == 'totp' ? '生成验证码' : '复制'),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: SelectableText(
+                                    item.ref,
+                                    maxLines: 1,
+                                    style: mono(12, p.muted),
+                                  ),
+                                ),
+                                _ToolIcon(
+                                  label: '复制引用',
+                                  icon: Icons.copy_rounded,
+                                  size: 14,
+                                  onPressed: () async {
+                                    await Clipboard.setData(
+                                      ClipboardData(text: item.ref),
+                                    );
+                                    if (mounted) toast('已复制引用 ${item.ref}');
+                                  },
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 5,
+                              runSpacing: 5,
+                              children: [
+                                _Pill(
+                                  kindShort(item.kind),
+                                  icon: kindIcon(item.kind),
+                                ),
+                                _Pill(
+                                  spaceName,
+                                  neutral: true,
+                                  icon: Icons.folder_outlined,
+                                ),
+                                if (item.metadata.archived)
+                                  const _Pill(
+                                    '已归档',
+                                    neutral: true,
+                                    icon: Icons.inventory_2_outlined,
+                                  ),
+                              ],
                             ),
                           ],
                         ),
+                      ),
                     ],
                   ),
-                ),
-                const SizedBox(height: 18),
-                metadataRow(
-                  'Space',
-                  Text(
-                    c.current!.spaces
-                            .where((s) => s.id == item.metadata.space)
-                            .firstOrNull
-                            ?.name ??
-                        item.metadata.space,
-                    style: TextStyle(fontSize: phone ? 14 : 12, color: ink),
-                  ),
-                ),
-                metadataRow(
-                  '类型',
-                  Text(
-                    kindLabel(item.kind),
-                    style: TextStyle(fontSize: phone ? 14 : 12, color: ink),
-                  ),
-                ),
-                metadataRow(
-                  '版本',
-                  Text(
-                    '第 ${item.version} 版',
-                    style: TextStyle(fontSize: phone ? 14 : 12, color: ink),
-                  ),
-                ),
-                metadataRow(
-                  '状态',
-                  Text(
-                    item.metadata.archived ? '已归档' : '可用',
-                    style: TextStyle(
-                      fontSize: phone ? 14 : 12,
-                      color: item.metadata.archived ? muted : accent,
-                    ),
-                  ),
-                ),
-                metadataRow(
-                  '标签',
-                  item.metadata.tags.isEmpty
-                      ? Text(
-                          '—',
-                          style: TextStyle(
-                            fontSize: phone ? 14 : 12,
-                            color: muted,
+                  const SizedBox(height: 20),
+                  _Group(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 14, 14),
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  item.kind == 'totp'
+                                      ? '一次性验证码'
+                                      : item.kind == 'passkey'
+                                      ? '通行密钥'
+                                      : '密钥值',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: p.muted,
+                                  ),
+                                ),
+                              ),
+                              Icon(
+                                Icons.lock_rounded,
+                                size: 12,
+                                color: p.faint,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                '已加密',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: p.faint,
+                                ),
+                              ),
+                            ],
                           ),
-                        )
-                      : Wrap(
-                          spacing: 4,
-                          runSpacing: 4,
-                          children: item.metadata.tags
-                              .map((tag) => _Pill('# $tag', neutral: true))
-                              .toList(),
+                          const SizedBox(height: 12),
+                          if (showingCode)
+                            _OTPDisplay(code: c.otp!, demo: c.client.isDemo)
+                          else
+                            Text(
+                              item.kind == 'passkey'
+                                  ? '私钥不可导出'
+                                  : item.kind == 'totp'
+                                  ? '••• •••'
+                                  : '••••••••••••••••',
+                              maxLines: 1,
+                              overflow: TextOverflow.clip,
+                              style: item.kind == 'passkey'
+                                  ? TextStyle(fontSize: 14, color: p.ink)
+                                  : TextStyle(
+                                      fontSize: 22,
+                                      letterSpacing: 2.5,
+                                      color: p.faint,
+                                      height: 1.3,
+                                    ),
+                            ),
+                          const SizedBox(height: 14),
+                          if (item.kind == 'passkey')
+                            Text(
+                              '系统提供者尚未接入',
+                              style: TextStyle(fontSize: 12, color: p.muted),
+                            )
+                          else
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.fingerprint,
+                                  size: 15,
+                                  color: p.faint,
+                                ),
+                                const SizedBox(width: 5),
+                                Expanded(
+                                  child: Text(
+                                    c.client.isDemo ? '模拟验证' : '每次使用都需系统验证',
+                                    maxLines: 2,
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      color: p.muted,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                FilledButton.icon(
+                                  key: const Key('use-key'),
+                                  onPressed: usable
+                                      ? () => action(
+                                          item.kind == 'totp'
+                                              ? c.generateOTP(item)
+                                              : c.copy(item),
+                                          item.kind == 'totp'
+                                              ? null
+                                              : c.client.isDemo
+                                              ? '已复制演示值，30 秒后清除'
+                                              : '已复制，30 秒后自动清除',
+                                        )
+                                      : null,
+                                  style: FilledButton.styleFrom(
+                                    minimumSize: Size(0, phone ? 44 : 34),
+                                  ),
+                                  icon: Icon(
+                                    item.kind == 'totp'
+                                        ? Icons.password_rounded
+                                        : Icons.content_copy_rounded,
+                                    size: 15,
+                                  ),
+                                  label: Text(
+                                    item.kind == 'totp' ? '生成验证码' : '复制',
+                                  ),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Group(
+                    children: [
+                      _InfoRow('Space', Text(spaceName, style: valueStyle)),
+                      _InfoRow(
+                        '类型',
+                        Text(kindLabel(item.kind), style: valueStyle),
+                      ),
+                      _InfoRow(
+                        '版本',
+                        Text('第 ${item.version} 版', style: valueStyle),
+                      ),
+                      _InfoRow(
+                        '状态',
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: item.metadata.archived
+                                    ? p.faint
+                                    : p.success,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              item.metadata.archived ? '已归档' : '可用',
+                              style: valueStyle.copyWith(
+                                color: item.metadata.archived
+                                    ? p.muted
+                                    : p.success,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                         ),
-                ),
-                const SizedBox(height: 16),
-                const Divider(height: 1),
-                const SizedBox(height: 14),
-                const _Label('备注'),
-                const SizedBox(height: 7),
-                Text(
-                  item.metadata.notes?.isNotEmpty == true
-                      ? item.metadata.notes!
-                      : '未填写',
-                  style: TextStyle(
-                    fontSize: phone ? 14 : 12,
-                    color: muted,
-                    height: 1.6,
+                      ),
+                      _InfoRow(
+                        '标签',
+                        item.metadata.tags.isEmpty
+                            ? Text(
+                                '—',
+                                style: valueStyle.copyWith(color: p.faint),
+                              )
+                            : Wrap(
+                                alignment: WrapAlignment.end,
+                                spacing: 4,
+                                runSpacing: 4,
+                                children: item.metadata.tags
+                                    .map((tag) => _Pill('#$tag', neutral: true))
+                                    .toList(),
+                              ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  const Padding(
+                    padding: EdgeInsets.only(left: 4, bottom: 7),
+                    child: _Label('备注'),
+                  ),
+                  _Group(
+                    padding: const EdgeInsets.all(14),
+                    children: [
+                      Text(
+                        item.metadata.notes?.isNotEmpty == true
+                            ? item.metadata.notes!
+                            : '未填写',
+                        style: TextStyle(
+                          fontSize: phone ? 15 : 13,
+                          color: item.metadata.notes?.isNotEmpty == true
+                              ? p.ink
+                              : p.faint,
+                          height: 1.6,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          key: const Key('edit-key'),
+                          onPressed: canManage ? () => editDialog(item) : null,
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: Size(0, phone ? 44 : 34),
+                          ),
+                          icon: const Icon(Icons.edit_outlined, size: 15),
+                          label: const Text('编辑信息'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextButton.icon(
+                          key: const Key('archive-key'),
+                          onPressed: canManage
+                              ? () => confirmArchive(item)
+                              : null,
+                          style: TextButton.styleFrom(
+                            foregroundColor: item.metadata.archived
+                                ? p.accent
+                                : p.danger,
+                            minimumSize: Size(0, phone ? 44 : 34),
+                          ),
+                          icon: Icon(
+                            item.metadata.archived
+                                ? Icons.unarchive_outlined
+                                : Icons.archive_outlined,
+                            size: 15,
+                          ),
+                          label: Text(item.metadata.archived ? '恢复条目' : '归档条目'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget stateView(String status) {
+    final title = status == 'unconfigured'
+        ? '连接本地保险库'
+        : status == 'error'
+        ? '无法连接核心'
+        : status == 'syncRecovery'
+        ? '上次同步尚未完成'
+        : '保险库已锁定';
+    final subtitle = status == 'unconfigured'
+        ? '先在终端完成建库，或体验演示保险库。'
+        : status == 'syncRecovery'
+        ? '使用上次的同步目标恢复安装。'
+        : c.client.isDemo
+        ? '使用虚构数据，模拟批准、拒绝与锁定。'
+        : '通过系统验证打开本地库。';
+    final icon = status == 'error'
+        ? Icons.link_off_rounded
+        : status == 'syncRecovery'
+        ? Icons.sync_problem_rounded
+        : status == 'unconfigured'
+        ? Icons.terminal_rounded
+        : Icons.lock_rounded;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: RadialGradient(
+          center: const Alignment(0, -.35),
+          radius: 1.1,
+          colors: [p.accentSoft, p.canvas],
+        ),
+      ),
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 340),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: SizedBox(
+                    width: 84,
+                    height: 84,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        const Positioned(
+                          left: 6,
+                          top: 6,
+                          child: _AppMark(size: 68),
+                        ),
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: Container(
+                            width: 30,
+                            height: 30,
+                            decoration: BoxDecoration(
+                              color: p.card,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: p.line),
+                            ),
+                            child: Icon(icon, size: 16, color: p.accent),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 22),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -.3,
+                    color: p.ink,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  subtitle,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: p.muted, height: 1.6),
+                ),
+                if (status == 'unconfigured')
+                  Container(
+                    margin: const EdgeInsets.only(top: 16),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: p.card,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: p.line),
+                    ),
+                    child: Row(
+                      children: [
+                        Text('\$', style: mono(13, p.faint)),
+                        const SizedBox(width: 8),
+                        SelectableText('kagi init', style: mono(13, p.ink)),
+                      ],
+                    ),
+                  ),
+                if (c.error != null)
+                  Container(
+                    margin: const EdgeInsets.only(top: 16),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: p.danger.withValues(alpha: p.isDark ? .14 : .07),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: p.danger.withValues(alpha: .3)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.error_outline_rounded,
+                          size: 16,
+                          color: p.danger,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            c.error!,
+                            style: TextStyle(color: p.danger, fontSize: 12.5),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 24),
+                if (status == 'locked')
+                  FilledButton.icon(
+                    key: const Key('unlock'),
+                    onPressed: c.busy ? null : () => action(c.unlock()),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                    ),
+                    icon: const Icon(Icons.fingerprint, size: 20),
+                    label: Text(c.busy ? '正在验证…' : '解锁保险库'),
+                  ),
+                if (status == 'syncRecovery')
+                  FilledButton(
+                    onPressed: c.busy ? null : syncDialog,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                    ),
+                    child: const Text('继续同步恢复'),
+                  ),
+                if (status == 'error')
+                  OutlinedButton(
+                    onPressed: c.busy ? null : () => action(c.load()),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                    ),
+                    child: const Text('重试连接'),
+                  ),
+                const SizedBox(height: 8),
                 Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
                   children: [
-                    OutlinedButton.icon(
-                      key: const Key('edit-key'),
-                      onPressed: canManage ? () => editDialog(item) : null,
-                      icon: const Icon(Icons.edit_outlined, size: 14),
-                      label: const Text('编辑信息'),
-                    ),
-                    TextButton.icon(
-                      key: const Key('archive-key'),
-                      onPressed: canManage ? () => confirmArchive(item) : null,
-                      icon: Icon(
-                        item.metadata.archived
-                            ? Icons.unarchive_outlined
-                            : Icons.archive_outlined,
-                        size: 14,
+                    if (c.client.isDemo)
+                      TextButton(
+                        onPressed: fakeDialog,
+                        child: const Text('设置模拟验证结果'),
                       ),
-                      label: Text(item.metadata.archived ? '恢复条目' : '归档条目'),
-                    ),
+                    if (!c.client.isDemo)
+                      TextButton(
+                        onPressed: () => widget.onBackend(true),
+                        child: const Text('体验演示保险库'),
+                      ),
+                    if (c.client.isDemo && widget.canNative)
+                      TextButton(
+                        onPressed: () => widget.onBackend(false),
+                        child: const Text('连接本机保险库'),
+                      ),
                   ],
                 ),
               ],
             ),
           ),
         ),
-      ],
-    ),
-  );
-
-  Widget metadataRow(String title, Widget value) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 55,
-          child: Text(
-            title,
-            style: TextStyle(
-              fontSize: MediaQuery.sizeOf(context).width < 980 ? 12 : 11,
-              color: muted,
-            ),
-          ),
-        ),
-        Expanded(child: value),
-      ],
-    ),
-  );
-
-  Widget stateView(String status) => Center(
-    child: SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: SizedBox(
-        width: 320,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Align(alignment: Alignment.centerLeft, child: _Brand()),
-            const SizedBox(height: 24),
-            Text(
-              status == 'unconfigured'
-                  ? '连接本地保险库'
-                  : status == 'error'
-                  ? '无法连接核心'
-                  : status == 'syncRecovery'
-                  ? '上次同步尚未完成'
-                  : '保险库已锁定',
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: ink,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              status == 'unconfigured'
-                  ? '先在终端完成建库，或体验演示保险库。'
-                  : status == 'syncRecovery'
-                  ? '使用上次的同步目标恢复安装。'
-                  : c.client.isDemo
-                  ? '使用虚构数据，模拟批准、拒绝与锁定。'
-                  : '通过系统验证打开本地库。',
-              style: const TextStyle(fontSize: 12, color: muted, height: 1.7),
-            ),
-            if (status == 'unconfigured')
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: SelectableText(
-                  'kagi init',
-                  style: TextStyle(fontFamily: 'monospace', fontSize: 12),
-                ),
-              ),
-            if (c.error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Text(
-                  c.error!,
-                  style: const TextStyle(
-                    color: Color(0xFFAA3C36),
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            const SizedBox(height: 20),
-            if (status == 'locked')
-              FilledButton.icon(
-                key: const Key('unlock'),
-                onPressed: c.busy ? null : () => action(c.unlock()),
-                icon: const Icon(Icons.fingerprint, size: 17),
-                label: Text(c.busy ? '正在验证…' : '解锁保险库'),
-              ),
-            if (status == 'syncRecovery')
-              FilledButton(
-                onPressed: c.busy ? null : syncDialog,
-                child: const Text('继续同步恢复'),
-              ),
-            if (status == 'error')
-              OutlinedButton(
-                onPressed: c.busy ? null : () => action(c.load()),
-                child: const Text('重试连接'),
-              ),
-            if (c.client.isDemo)
-              TextButton(onPressed: fakeDialog, child: const Text('设置模拟验证结果')),
-            if (!c.client.isDemo)
-              TextButton(
-                onPressed: () => widget.onBackend(true),
-                child: const Text('体验演示保险库'),
-              ),
-            if (c.client.isDemo && widget.canNative)
-              TextButton(
-                onPressed: () => widget.onBackend(false),
-                child: const Text('连接本机保险库'),
-              ),
-          ],
-        ),
       ),
-    ),
-  );
+    );
+  }
 
   Future<void> confirmArchive(KeyItem item) async {
     final accepted = await showDialog<bool>(
@@ -1312,6 +1690,12 @@ class _VaultHomeState extends State<VaultHome> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
+            style: item.metadata.archived
+                ? null
+                : FilledButton.styleFrom(
+                    backgroundColor: context.kp.danger,
+                    foregroundColor: Colors.white,
+                  ),
             child: const Text('确认'),
           ),
         ],
@@ -1330,33 +1714,45 @@ class _VaultHomeState extends State<VaultHome> {
     final fake = c.client as FakeKagiClient;
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('模拟验证'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '仅影响内存演示库，不会改变系统认证。',
-              style: TextStyle(fontSize: 12, color: muted),
+      builder: (context) {
+        final p = context.kp;
+        return AlertDialog(
+          title: const Text('模拟验证'),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('仅影响内存演示库，不会改变系统认证。'),
+                const SizedBox(height: 12),
+                for (final entry in [
+                  (FakeDecision.approve, '批准', Icons.check_circle_outline),
+                  (FakeDecision.deny, '拒绝', Icons.block_rounded),
+                  (FakeDecision.locked, '设备锁定', Icons.lock_outline),
+                ])
+                  ListTile(
+                    dense: true,
+                    leading: Icon(entry.$3, size: 18),
+                    title: Text(
+                      entry.$2,
+                      style: TextStyle(fontSize: 13, color: p.ink),
+                    ),
+                    selected: fake.decision == entry.$1,
+                    selectedTileColor: p.selection,
+                    trailing: fake.decision == entry.$1
+                        ? Icon(Icons.check_rounded, color: p.accent, size: 18)
+                        : null,
+                    onTap: () {
+                      fake.decision = entry.$1;
+                      Navigator.pop(context);
+                    },
+                  ),
+              ],
             ),
-            for (final entry in [
-              (FakeDecision.approve, '批准'),
-              (FakeDecision.deny, '拒绝'),
-              (FakeDecision.locked, '设备锁定'),
-            ])
-              ListTile(
-                title: Text(entry.$2),
-                trailing: fake.decision == entry.$1
-                    ? const Icon(Icons.check, color: accent)
-                    : null,
-                onTap: () {
-                  fake.decision = entry.$1;
-                  Navigator.pop(context);
-                },
-              ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 

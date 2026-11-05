@@ -147,7 +147,10 @@ class _EditDialogState extends State<_EditDialog> {
             if (error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 10),
-                child: Text(error!, style: const TextStyle(color: Colors.red)),
+                child: Text(
+                  error!,
+                  style: TextStyle(fontSize: 12.5, color: context.kp.danger),
+                ),
               ),
           ],
         ),
@@ -221,7 +224,11 @@ class _SyncDialogState extends State<_SyncDialog> {
               c.client.isDemo
                   ? '演示同步：不会连接任何云端或读取本机文件。'
                   : '当前支持独立目录仓库。iCloud、Google Drive、WebDAV 将分别接入。',
-              style: const TextStyle(fontSize: 12, height: 1.5, color: muted),
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.55,
+                color: context.kp.muted,
+              ),
             ),
             const SizedBox(height: 18),
             if (!c.client.isDemo)
@@ -247,7 +254,7 @@ class _SyncDialogState extends State<_SyncDialog> {
                 padding: const EdgeInsets.symmetric(vertical: 15),
                 child: Text(
                   message!,
-                  style: const TextStyle(fontSize: 12, color: accent),
+                  style: TextStyle(fontSize: 12.5, color: context.kp.accent),
                 ),
               ),
             for (final conflict in c.conflicts)
@@ -278,12 +285,12 @@ class _SyncDialogState extends State<_SyncDialog> {
                             padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
                               color: choices[conflict.id] == side
-                                  ? const Color(0xFFEDF5F6)
-                                  : Colors.white,
+                                  ? context.kp.selection
+                                  : context.kp.card,
                               border: Border.all(
                                 color: choices[conflict.id] == side
-                                    ? accent
-                                    : line,
+                                    ? context.kp.accent
+                                    : context.kp.line,
                               ),
                               borderRadius: BorderRadius.circular(5),
                             ),
@@ -294,7 +301,7 @@ class _SyncDialogState extends State<_SyncDialog> {
                                       ? Icons.radio_button_checked
                                       : Icons.radio_button_off,
                                   size: 18,
-                                  color: accent,
+                                  color: context.kp.accent,
                                 ),
                                 const SizedBox(width: 10),
                                 Expanded(
@@ -312,9 +319,9 @@ class _SyncDialogState extends State<_SyncDialog> {
                                       const SizedBox(height: 5),
                                       Text(
                                         conflict.describe(side == 'local'),
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: muted,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: context.kp.muted,
                                         ),
                                       ),
                                     ],
@@ -424,10 +431,7 @@ class _SpaceDialogState extends State<_SpaceDialog> {
                 padding: const EdgeInsets.only(top: 10),
                 child: Text(
                   error!,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFFAA3C36),
-                  ),
+                  style: TextStyle(fontSize: 12.5, color: context.kp.danger),
                 ),
               ),
           ],
