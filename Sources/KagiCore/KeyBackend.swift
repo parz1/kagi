@@ -26,6 +26,8 @@ public struct SecureEnclaveBackend: KeyBackend {
   public let promptTimeout: TimeInterval?
   /// 取消验证后系统调用仍不返回时调用。CLI 用它报错退出；nil 时继续等。
   public let onStuck: (@Sendable () -> Void)?
+  /// 屏幕是否锁着。只在测试里替换。
+  var screenIsLocked: @Sendable () -> Bool? = { Diagnostics.isScreenLocked() }
 
   public init(promptTimeout: TimeInterval? = nil, onStuck: (@Sendable () -> Void)? = nil) {
     self.promptTimeout = promptTimeout
@@ -53,6 +55,9 @@ public struct SecureEnclaveBackend: KeyBackend {
   }
 
   public func openWithPresence(_ box: HPKEBox, blob: Data, binding: Data, reason: String) throws -> Data {
+    // 实测锁屏后约 10 秒内系统还接受密钥操作，但验证框显示不出来，不提前判断就会白等到超时。
+    // 这里只会提前拒绝，不会放行：真正的验证仍由密钥操作触发。
+    if screenIsLocked() == true { throw KeyFailure.locked }
     let context = LAContext()
     context.localizedReason = reason
     // 调用仍在当前线程同步进行，和以前一样；看门狗只在超时后取消 context。

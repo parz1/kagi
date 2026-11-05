@@ -29,6 +29,7 @@ enum Doctor {
       bootstrapManager: Diagnostics.bootstrapManager(),
       responsibleProcess: Diagnostics.responsibleProcess(),
       session: Diagnostics.securitySession(),
+      screenLocked: Diagnostics.isScreenLocked(),
       auth: Diagnostics.canAuthenticate(),
       timeout: try Commands.authTimeout(),
       configured: (try? Commands.localStore().load()) != nil)
@@ -56,10 +57,13 @@ enum Doctor {
     let reason = "kagi doctor：测试能否弹出验证框，不读取任何密钥（\(Reason.by(initiator))）"
     let started = Date()
     var error: NSError?
-    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-      let result: PromptResult = Diagnostics.isSandboxed() == true ? .blocked : .unavailable
-      return (result, error.map(describe) ?? "不能验证", 0)
+    let available = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
+    // 沙箱优先：解了锁也弹不出来，先告诉用户真正要处理的事。
+    if !available, Diagnostics.isSandboxed() == true {
+      return (.blocked, error.map(describe) ?? "不能验证", 0)
     }
+    if Diagnostics.isScreenLocked() == true { return (.locked, "屏幕锁着", 0) }
+    guard available else { return (.unavailable, error.map(describe) ?? "不能验证", 0) }
     let done = DispatchSemaphore(value: 0)
     let box = PromptBox()
     context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, error in
@@ -150,6 +154,7 @@ enum Doctor {
     let bootstrapManager: String?
     let responsibleProcess: String?
     let session: Diagnostics.SecuritySession?
+    let screenLocked: Bool?
     let auth: (ok: Bool, detail: String)
     let timeout: Int
     let configured: Bool
@@ -189,6 +194,7 @@ enum Doctor {
         "sandboxHints": hints,
         "bootstrapManager": optional(bootstrapManager),
         "responsibleProcess": optional(responsibleProcess),
+        "screenLocked": screenLocked.map { $0 as Any } ?? NSNull(),
         "secureEnclave": SecureEnclave.isAvailable,
         "localAuthentication": ["ok": auth.ok, "detail": auth.detail] as [String: Any],
         "stdinIsTTY": isatty(STDIN_FILENO) == 1,
@@ -255,6 +261,11 @@ enum Doctor {
       } else {
         line(nil, "图形会话", "未知")
       }
+      if let screenLocked {
+        line(!screenLocked, "屏幕", screenLocked ? "锁着" : "没锁")
+      } else {
+        line(nil, "屏幕", "未知")
+      }
       line(SecureEnclave.isAvailable, "Secure Enclave", SecureEnclave.isAvailable ? "可用" : "不可用")
       line(auth.ok, "系统验证", auth.ok ? "可用（\(auth.detail)）" : auth.detail)
       line(nil, "本机库", configured ? "已设置" : "还没设置")
@@ -271,11 +282,14 @@ enum Doctor {
       if session?.graphicAccess == false {
         advice.append("当前会话没有图形界面，验证框无法显示。请在这台 Mac 的桌面会话里运行。")
       }
+      if screenLocked == true {
+        advice.append("屏幕锁着，验证框显示不出来。请解锁后再试。")
+      }
       if prompt?.result == .timedOut {
-        advice.append("测试验证框没有完成，多半没有显示出来（AUTH-001）。请在自己的终端里再运行一次 kagi doctor --prompt 对比。")
+        advice.append("测试验证框没有完成：可能没被注意到，也可能没显示出来（AUTH-001）。请在自己的终端里再运行一次 kagi doctor --prompt 对比。")
       }
       if keyPrompt?.result == .timedOut {
-        advice.append("测试验证框能弹，密钥操作的验证框却没有完成：问题在 Secure Enclave 操作本身（AUTH-001），请记下这份输出。")
+        advice.append("测试验证框能弹，密钥操作的验证框却没有完成：可能没被注意到，否则问题在 Secure Enclave 操作本身（AUTH-001），请记下这份输出。")
       }
       if prompt == nil {
         advice.append("加 --prompt 可以实际弹两次测试验证框（不读取任何密钥）。")

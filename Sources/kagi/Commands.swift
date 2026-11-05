@@ -290,7 +290,7 @@ enum Commands {
           action: "set", refs: [ref.path], command: nil,
           fullCommand: initiator.shellCommand.map(auditRedactor.redact),
           initiator: initiator,
-          result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error"))
+          result: error.auditResult))
       throw error
     }
     let version = try session.write(
@@ -422,7 +422,7 @@ enum Commands {
         UseRecord(
           action: "run", refs: refs, command: commandText, fullCommand: initiator.shellCommand,
           initiator: initiator,
-          result: error.code == .denied ? "denied" : error.code == .tempFail ? "locked" : "error",
+          result: error.auditResult,
           exitCode: error.code.rawValue))
       throw error
     }
@@ -619,6 +619,8 @@ enum Commands {
     case "approved": return "批准"
     case "denied": return "拒绝"
     case "locked": return "锁屏"
+    case "timedOut": return "超时"
+    case "blocked": return "被沙箱拦住"
     case "notFound": return "没找到"
     default: return "出错"
     }

@@ -11,7 +11,7 @@ public struct UseRecord: Codable, Equatable, Sendable {
   public var fullCommand: String?
   public var initiator: String
   public var chain: [String]
-  /// approved、denied、locked、notFound、error
+  /// approved、denied、locked、timedOut、blocked、notFound、error
   public var result: String
   public var exitCode: Int32?
 

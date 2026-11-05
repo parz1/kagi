@@ -25,11 +25,18 @@ public struct KagiError: Error, CustomStringConvertible {
   public let code: ExitCode
   public let message: String
   public let hint: String?
+  private let audit: String?
 
-  public init(_ code: ExitCode, _ message: String, hint: String? = nil) {
+  public init(_ code: ExitCode, _ message: String, hint: String? = nil, audit: String? = nil) {
     self.code = code
     self.message = message
     self.hint = hint
+    self.audit = audit
+  }
+
+  /// 写进使用记录的结果。同样是 75 时靠它区分锁屏、超时和被沙箱拦住。
+  public var auditResult: String {
+    audit ?? (code == .denied ? "denied" : code == .tempFail ? "locked" : "error")
   }
 
   public var description: String {

@@ -95,11 +95,36 @@ final class DiagnosticsTests: XCTestCase {
       Kagi.describe(.blocked("x"), action: .write, byAgent: false).message.contains("什么都没存"), true)
   }
 
+  func testLockedScreenFailsBeforeAnyKeyOperation() {
+    // 锁屏时直接拒绝：这里的 blob 是空的，真的走到密钥操作会得到别的错误。
+    var backend = SecureEnclaveBackend()
+    backend.screenIsLocked = { true }
+    XCTAssertThrowsError(
+      try backend.openWithPresence(
+        HPKEBox(enc: "", ciphertext: ""), blob: Data(), binding: Data(), reason: "假的")
+    ) { XCTAssertEqual($0 as? KeyFailure, .locked) }
+  }
+
+  func testUseLogTellsApartTheReasonsBehindExitCode75() {
+    func audit(_ failure: KeyFailure) -> String {
+      Kagi.describe(failure, action: .read, byAgent: true).auditResult
+    }
+    XCTAssertEqual(audit(.timedOut(90)), "timedOut")
+    XCTAssertEqual(audit(.blocked("x")), "blocked")
+    XCTAssertEqual(audit(.locked), "locked")
+    XCTAssertEqual(audit(.denied), "denied")
+    XCTAssertEqual(audit(.other("x")), "error")
+    for failure in [KeyFailure.timedOut(90), .blocked("x"), .locked] {
+      XCTAssertEqual(Kagi.describe(failure, action: .read, byAgent: true).code, .tempFail)
+    }
+  }
+
   func testProcessDiagnosticsRunWithoutPrompting() {
     _ = Diagnostics.isSandboxed()
     _ = Diagnostics.securitySession()
     _ = Diagnostics.canAuthenticate()
     _ = Diagnostics.promptBlockers()
+    _ = Diagnostics.isScreenLocked()
     XCTAssertFalse(Diagnostics.bootstrapManager()?.isEmpty ?? false)
     XCTAssertFalse(Diagnostics.responsibleProcess()?.isEmpty ?? false)
   }
