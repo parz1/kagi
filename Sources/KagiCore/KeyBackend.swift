@@ -87,8 +87,10 @@ public struct SecureEnclaveBackend: KeyBackend {
     }
   }
 
-  /// 把系统给的各种错误归成几类。实测：点取消是 LocalAuthentication -2；锁屏时是 -25308。
-  static func failure(from error: Error) -> KeyFailure {
+  /// 把系统给的各种错误归成几类。实测：点取消是 LocalAuthentication -2；锁屏时是 -25308；
+  /// Codex 的 seatbelt 里是 NSCocoaErrorDomain 4099（连不上 coreauthd 和 ctkd）。
+  /// 在沙箱里遇到认不出的错误时按「被拦住」处理：原始描述保留在错误里，不会掩盖真实原因。
+  static func failure(from error: Error, sandboxed: Bool? = Diagnostics.isSandboxed()) -> KeyFailure {
     if let failure = error as? KeyFailure { return failure }
     if let crypto = error as? CryptoKitError, case .authenticationFailure = crypto { return .tampered }
     let ns = error as NSError
@@ -106,7 +108,8 @@ public struct SecureEnclaveBackend: KeyBackend {
     case (_, Int(errSecInteractionNotAllowed)):
       return .locked
     default:
-      return .other("\(ns.domain) \(ns.code) \(ns.localizedDescription)")
+      let detail = "\(ns.domain) \(ns.code) \(ns.localizedDescription)"
+      return sandboxed == true ? .blocked(detail) : .other(detail)
     }
   }
 }

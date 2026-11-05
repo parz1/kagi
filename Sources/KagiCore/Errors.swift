@@ -47,6 +47,8 @@ public enum KeyFailure: Error, Equatable {
   case tampered
   /// 等了这么多秒系统验证仍未完成，已取消（验证框可能根本没有显示）。
   case timedOut(Int)
+  /// 进程在沙箱里，连不上系统验证或 Secure Enclave（例如 seatbelt 拒绝了相关服务）。带系统的原始描述。
+  case blocked(String)
   /// 其他错误，带原始描述。
   case other(String)
 }

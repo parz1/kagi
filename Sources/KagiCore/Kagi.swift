@@ -115,6 +115,9 @@ public enum Kagi {
     backend: KeyBackend, reason: String
   ) throws -> (DeviceFile, DeviceState) {
     guard backend.isAvailable else {
+      if Diagnostics.isSandboxed() == true {
+        throw describe(.blocked("Secure Enclave 不可用"), action: .enroll, byAgent: false)
+      }
       throw KagiError(.config, "这台 Mac 没有 Secure Enclave，kagi 用不了。")
     }
     let deviceID = "mac-" + Base32.encode(Crypto.randomBytes(5)).lowercased()
@@ -208,6 +211,10 @@ public enum Kagi {
       return KagiError(.dataError, "解密失败：库里的文件被改过，或者不属于这台 Mac 的钥匙。\(nothing)")
     case .timedOut(let seconds):
       return Kagi.timedOut(seconds, nothing: nothing, byAgent: byAgent)
+    case .blocked(let detail):
+      return KagiError(
+        .tempFail, "kagi 运行在沙箱里，连不上系统验证和 Secure Enclave，验证框弹不出来。\(nothing)",
+        hint: "重试没有用。需要由用户决定是否让 kagi 在沙箱外运行，运行 kagi doctor 查看做法；不要设法绕开系统验证。\n系统返回：\(detail)")
     case .other(let detail):
       return KagiError(.software, "Secure Enclave 出错：\(detail)")
     }
