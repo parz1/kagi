@@ -61,7 +61,7 @@ final class DiagnosticsTests: XCTestCase {
   }
 
   func testConnectionErrorInSandboxMeansBlocked() {
-    // Codex 的 seatbelt 拒绝 coreauthd 和 ctkd 时，密钥操作实测返回这个错误。
+    // seatbelt 拒绝连接 coreauthd 和 ctkd 时，密钥操作实测返回这个错误。
     let blocked = NSError(
       domain: NSCocoaErrorDomain, code: 4099,
       userInfo: [NSLocalizedDescriptionKey: "Couldn’t communicate with a helper application."])

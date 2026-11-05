@@ -215,7 +215,7 @@ public enum Kagi {
     case .blocked(let detail):
       return KagiError(
         .tempFail, "kagi 运行在沙箱里，连不上系统验证和 Secure Enclave，验证框弹不出来。\(nothing)",
-        hint: "重试没有用。需要由用户决定是否让 kagi 在沙箱外运行，运行 kagi doctor 查看做法；不要设法绕开系统验证。\n系统返回：\(detail)",
+        hint: "重试没有用。需要由用户决定是否在 agent 的设置里允许 kagi 在沙箱外运行，运行 kagi doctor 查看说明；不要设法绕开系统验证。\n系统返回：\(detail)",
         audit: "blocked")
     case .other(let detail):
       return KagiError(.software, "Secure Enclave 出错：\(detail)")

@@ -378,7 +378,7 @@ class CLITests(CLIFixture):
         self.assertEqual(self.call('doctor').returncode, 64)
 
     def test_doctor_in_sandbox_says_blocked_and_never_prompts(self):
-        # 和 Codex 的 seatbelt 一样拒绝系统验证、Secure Enclave 相关服务，只验证 kagi 的判断和提示。
+        # 用 seatbelt 拒绝系统验证、Secure Enclave 相关服务，只验证 kagi 的判断和提示。
         profile = ('(version 1)(allow default)(deny mach-lookup'
                    ' (global-name "com.apple.CoreAuthentication.agent")'
                    ' (global-name "com.apple.CoreAuthentication.agent.libxpc")'
@@ -405,7 +405,7 @@ class CLITests(CLIFixture):
 
         text = sandboxed('--prompt').stdout.decode()
         self.assertIn('被沙箱拦住', text)
-        self.assertIn('prefix_rule(pattern=["kagi"], decision="allow")', text)
+        self.assertIn('在沙箱外运行', text)
 
     def test_invalid_pass_env_never_executes(self):
         self.put('demo/token')

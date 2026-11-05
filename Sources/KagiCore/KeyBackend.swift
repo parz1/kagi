@@ -93,7 +93,7 @@ public struct SecureEnclaveBackend: KeyBackend {
   }
 
   /// 把系统给的各种错误归成几类。实测：点取消是 LocalAuthentication -2；锁屏时是 -25308；
-  /// Codex 的 seatbelt 里是 NSCocoaErrorDomain 4099（连不上 coreauthd 和 ctkd）。
+  /// seatbelt 拒绝连接 coreauthd 和 ctkd 时是 NSCocoaErrorDomain 4099。
   /// 在沙箱里遇到认不出的错误时按「被拦住」处理：原始描述保留在错误里，不会掩盖真实原因。
   static func failure(from error: Error, sandboxed: Bool? = Diagnostics.isSandboxed()) -> KeyFailure {
     if let failure = error as? KeyFailure { return failure }

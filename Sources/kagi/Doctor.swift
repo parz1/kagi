@@ -276,8 +276,7 @@ enum Doctor {
       var advice: [String] = []
       if sandboxed == true {
         advice.append("kagi 在沙箱里运行，连不上系统验证和 Secure Enclave，验证框弹不出来，重试没有用。")
-        advice.append("请让 kagi 在沙箱外运行，例如 Codex 在 ~/.codex/rules/default.rules 里加一行：prefix_rule(pattern=[\"kagi\"], decision=\"allow\")")
-        advice.append("这样 kagi run 启动的命令也在沙箱外，每次运行前都要你在系统验证框里确认这条命令。")
+        advice.append("请在 agent 的设置里允许 kagi 在沙箱外运行。这样 kagi run 启动的命令也在沙箱外，每次运行前都要你在系统验证框里确认这条命令。")
       }
       if session?.graphicAccess == false {
         advice.append("当前会话没有图形界面，验证框无法显示。请在这台 Mac 的桌面会话里运行。")

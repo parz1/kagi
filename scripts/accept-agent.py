@@ -9,7 +9,7 @@
 
 然后分别在 Terminal 和 agent 里运行，结果写到 <work>/accept-<name>.json：
 
-  python3 scripts/accept-agent.py --work /tmp/kagi-auth001 --name codex [--lock | --lock-only]
+  python3 scripts/accept-agent.py --work /tmp/kagi-auth001 --name <环境名> [--lock | --lock-only]
 
 每一步的操作写在验证框的命令里（「第2步-请点取消」），不用看这个脚本的输出。
 """
@@ -43,7 +43,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--work', required=True, type=Path, help='测试库所在目录（含 local/ 和 vault/）')
-    parser.add_argument('--name', required=True, help='这次运行的环境名，比如 codex、terminal')
+    parser.add_argument('--name', required=True, help='这次运行的环境名，只用来命名结果文件')
     parser.add_argument('--lock', action='store_true', help='包含锁屏一步：检测到锁屏后才发起请求')
     parser.add_argument('--lock-only', action='store_true', help='只做锁屏这一步')
     args = parser.parse_args()
