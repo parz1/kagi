@@ -338,10 +338,15 @@ class CLITests(CLIFixture):
         self.env['NODE_OPTIONS'] = '--require=/tmp/kagi-fake-hook.js'
         self.env['npm_config_script_shell'] = '/tmp/kagi-fake-shell'
         self.env['KAGI_FAKE_ORDINARY'] = 'kept'
-        script = ('test -z "${NODE_OPTIONS+x}" && test -z "${npm_config_script_shell+x}"'
-                  ' && test "$KAGI_FAKE_ORDINARY" = kept && test "$DEMO" = FAKE-TOKEN-FOR-TEST')
-        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/bin/sh', '-c', script)
+        # 用 env 打印子进程拿到的环境；命令保持简短，不触发授权说明的长度限制。
+        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/usr/bin/env')
         self.assertEqual(result.returncode, 0, result.stderr)
+        names = {line.split('=', 1)[0]: line for line in result.stdout.decode().splitlines()}
+        self.assertNotIn('NODE_OPTIONS', names)
+        self.assertNotIn('npm_config_script_shell', names)
+        self.assertEqual(names.get('KAGI_FAKE_ORDINARY'), 'KAGI_FAKE_ORDINARY=kept')
+        # 注入的值照常交给子进程，输出里被打码。
+        self.assertEqual(names.get('DEMO'), 'DEMO=‹kagi:demo/token›')
         stderr = result.stderr.decode()
         self.assertIn('NODE_OPTIONS', stderr)
         self.assertIn('npm_config_script_shell', stderr)
