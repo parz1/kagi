@@ -7,6 +7,17 @@
 - 钥匙在这台 Mac 的 Secure Enclave 里，另有一把恢复密钥抄在纸上。没有库口令。
 - 只依赖系统框架（CryptoKit、Security、LocalAuthentication、Foundation、AppKit），加密运算全部交给 CryptoKit 和 Secure Enclave。
 
+## GUI 初版
+
+Flutter 界面已加入 `apps/gui/`：桌面三栏、手机分层导航，默认使用虚构数据的内存演示库。macOS 通过原生 MethodChannel 复用 Swift 核心；其他平台的原生后端待接入。可在界面中明确切换演示库与本机库，不会在本机连接失败时静默退回 fake。
+
+```bash
+scripts/gui.sh demo
+scripts/gui.sh native
+```
+
+运行、测试与当前限制见 [GUI README](apps/gui/README.md)，核心接口与认证边界见 [GUI 接口](docs/GUI接口.md)。GUI 初版不含建库/恢复、值轮换或真实系统 Passkey 提供者；已有真实 agent 认证问题仍单独保留。
+
 ## 安装
 
 需要 macOS 15 或更新的系统，以及带 Secure Enclave 的 Mac。
