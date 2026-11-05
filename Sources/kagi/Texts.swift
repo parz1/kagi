@@ -22,8 +22,11 @@ enum Texts {
       kagi passkey register|assert <引用> --stdin
                                             fake 调试核心联调；请求 JSON，尚未接入系统提供者
       kagi run [--env 变量名=<引用>]... [--stdin <引用>]
-               [--otp 变量名=<TOTP 引用>]... [--otp-stdin <TOTP 引用>] -- <命令> [参数...]
-                                            交出普通值或临时验证码，不交出验证器种子/私钥
+               [--otp 变量名=<TOTP 引用>]... [--otp-stdin <TOTP 引用>] [--pass-env 变量名]...
+               -- <命令> [参数...]
+                                            交出普通值或临时验证码，不交出验证器种子/私钥；
+                                            NODE_OPTIONS、DYLD_* 等能加载额外代码的继承变量默认移除，
+                                            --pass-env 显式保留，其值写进授权说明
       kagi ls [--space <ID>] [--tag <标签>]... [--search <关键词>] [--all|--archived] [--json]
                                             筛选 key（多个标签为同时满足；默认隐藏归档项）
       kagi where <引用> [--json]            看一条的详情（包含归档项，不显示值）
@@ -57,5 +60,6 @@ enum Texts {
     - 退出码 75：按错误提示处理。锁屏时等用户回来；条目已变化时先核对，不要盲目重试。
     - 退出码 66：引用不存在。先跑 `kagi ls`。
     - 输出里的 ‹kagi:引用› 是打过码的值，不要设法还原。
+    - `run` 默认不把 NODE_OPTIONS、PYTHONPATH、DYLD_* 等继承变量交给命令；不要设法绕开。确实需要时加 `--pass-env 变量名`，并告诉用户为什么。
     """
 }

@@ -332,6 +332,41 @@ class CLITests(CLIFixture):
         self.assertIn('‹kagi:demo/token›'.encode(), result.stderr)
         self.assertNotIn(b'FAKE-TOKEN-FOR-TEST', result.stdout + result.stderr)
 
+    def test_code_loading_environment_is_not_inherited_by_default(self):
+        self.put('demo/token')
+        # 只用假值；不设置 DYLD_*，免得影响 kagi 自己的启动。
+        self.env['NODE_OPTIONS'] = '--require=/tmp/kagi-fake-hook.js'
+        self.env['npm_config_script_shell'] = '/tmp/kagi-fake-shell'
+        self.env['KAGI_FAKE_ORDINARY'] = 'kept'
+        script = ('test -z "${NODE_OPTIONS+x}" && test -z "${npm_config_script_shell+x}"'
+                  ' && test "$KAGI_FAKE_ORDINARY" = kept && test "$DEMO" = FAKE-TOKEN-FOR-TEST')
+        result = self.call('run', '--env', 'DEMO=demo/token', '--', '/bin/sh', '-c', script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stderr = result.stderr.decode()
+        self.assertIn('NODE_OPTIONS', stderr)
+        self.assertIn('npm_config_script_shell', stderr)
+        self.assertNotIn('kagi-fake-hook.js', stderr)
+
+    def test_pass_env_keeps_variable_and_shows_value_in_approval(self):
+        self.put('demo/token')
+        self.env['NODE_OPTIONS'] = '--require=/tmp/kagi-fake-hook.js'
+        result = self.call('run', '--env', 'DEMO=demo/token', '--pass-env', 'NODE_OPTIONS', '--',
+                           '/bin/sh', '-c', 'test "$NODE_OPTIONS" = --require=/tmp/kagi-fake-hook.js')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        description = result.stderr.decode().split('模拟授权说明：')[-1]
+        self.assertIn('NODE_OPTIONS=--require=/tmp/kagi-fake-hook.js', description)
+
+    def test_invalid_pass_env_never_executes(self):
+        self.put('demo/token')
+        marker = self.root / 'should-not-exist'
+        for extra in [['--pass-env', 'HOME'], ['--pass-env', 'NODE_OPTIONS', '--env', 'NODE_OPTIONS=demo/token']]:
+            with self.subTest(extra=extra):
+                result = self.call('run', '--env', 'DEMO=demo/token', *extra, '--',
+                                   '/usr/bin/touch', str(marker))
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertFalse(marker.exists())
+                self.assertNotIn('模拟授权说明：'.encode(), result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

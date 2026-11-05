@@ -13,7 +13,7 @@ Flutter 界面位于 `apps/gui/`，Dart 入口依赖 `KagiClient`，不依赖平
 | `create(KeyDraft)` | 普通文本密钥或 TOTP 导入；GUI 单次值上限 64 KiB；不覆盖已有引用 |
 | `update(expected, metadata)` | 改标题、Space、标签、备注与归档；保留值、引用和类型；拒绝旧 revision |
 | `space(action, id, name)` | 创建、重命名与删除空 Space；默认 Space 不删除 |
-| `copySecret(expected)` | 原生验证后直接复制，不把普通密钥明文传回 Flutter；30 秒后或正常退出时，仅清除仍由本次操作持有的剪贴板 |
+| `copySecret(expected)` | 原生验证后直接复制，不把普通密钥明文传回 Flutter；与 CLI 一样只留在本机并标记为隐藏、临时；30 秒后或正常退出时，仅清除仍由本次操作持有的剪贴板 |
 | `totp(expected)` | 返回当前临时验证码与失效时间，不返回种子 |
 | `synchronize(path, choices)` | 目录同步、冲突摘要、同次提交全部选择；中断安装可恢复 |
 

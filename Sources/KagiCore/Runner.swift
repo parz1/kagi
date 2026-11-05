@@ -25,13 +25,15 @@ public enum Runner {
   }
 
   /// 返回子进程的退出码；被信号杀掉时返回 128 + 信号。
+  /// baseEnvironment 是交给子进程的继承环境，调用方应先用 EnvironmentPolicy 过滤；extraEnvironment 覆盖在它上面。
   public static func run(
-    argv: [String], extraEnvironment: [String: String], stdinData: Data?,
+    argv: [String], baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+    extraEnvironment: [String: String], stdinData: Data?,
     values: [(ref: String, value: Data)]
   ) throws -> Int32 {
     precondition(!argv.isEmpty)
 
-    var environment = ProcessInfo.processInfo.environment
+    var environment = baseEnvironment
     for (key, value) in extraEnvironment { environment[key] = value }
 
     var outPipe: [Int32] = [0, 0]
