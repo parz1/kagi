@@ -11,11 +11,16 @@ enum Reason {
     initiator.label + (initiator.label.last?.isASCII == true ? " 发起" : "发起")
   }
 
-  static func run(injections: [String], command: String, directory: String, initiator: Initiator)
-    throws -> String
-  {
+  static func run(
+    injections: [String], command: String, directory: String,
+    keptEnvironment: [EnvironmentPolicy.Kept] = [], initiator: Initiator
+  ) throws -> String {
+    let kept =
+      keptEnvironment.isEmpty
+      ? ""
+      : "；保留继承的环境变量 " + keptEnvironment.map { "\($0.name)=\($0.value)" }.joined(separator: "、")
     let reason =
-      "交给命令「\(command)」；目录「\(directory)」；\(injections.joined(separator: "、"))（\(by(initiator))）"
+      "交给命令「\(command)」；目录「\(directory)」；\(injections.joined(separator: "、"))\(kept)（\(by(initiator))）"
     guard Term.displayWidth(reason) <= 500,
       !reason.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
     else {
@@ -291,7 +296,7 @@ enum Commands {
   static func run(_ args: [String]) throws -> Int32 {
     guard let separator = args.firstIndex(of: "--") else {
       throw KagiError(
-        .usage, "用法：kagi run --env 变量名=<引用> [--stdin <引用>] -- <命令> [参数...]",
+        .usage, "用法：kagi run --env 变量名=<引用> [--stdin <引用>] [--pass-env 变量名] -- <命令> [参数...]",
         hint: "-- 后面是要运行的命令。")
     }
     var command = Array(args[(separator + 1)...])
@@ -313,6 +318,14 @@ enum Commands {
       }
       otpRefs.append((String(pair[..<eq]), try Ref(String(pair[pair.index(after: eq)...]))))
     }
+    var passEnv: [String] = []
+    while let name = try parser.value(for: "--pass-env") {
+      guard EnvironmentPolicy.isRisky(name) else {
+        throw KagiError(
+          .usage, "\(name) 不在默认移除的环境变量名单里，本来就会交给命令，不需要 --pass-env。")
+      }
+      passEnv.append(name)
+    }
     let stdinRef = try parser.value(for: "--stdin").map { try Ref($0) }
     let otpStdinRef = try parser.value(for: "--otp-stdin").map { try Ref($0) }
     try parser.finish()
@@ -321,11 +334,23 @@ enum Commands {
     else {
       throw KagiError(.usage, "环境变量名不能重复，--stdin 与 --otp-stdin 不能同时使用。")
     }
+    guard Set(passEnv).isDisjoint(with: (envRefs + otpRefs).map(\.name)) else {
+      throw KagiError(.usage, "同一个环境变量不能既用 --pass-env 保留，又用 --env/--otp 注入。")
+    }
     guard !envRefs.isEmpty || !otpRefs.isEmpty || stdinRef != nil || otpStdinRef != nil else {
       throw KagiError(.usage, "至少要用 --env 或 --stdin 交出一条值。")
     }
 
     command[0] = try Runner.resolveExecutable(command[0])
+    // 能让子进程加载额外代码的继承变量默认不交出去；授权说明里看不到它们。
+    let inherited = EnvironmentPolicy.filter(
+      ProcessInfo.processInfo.environment, keep: Set(passEnv))
+    if !inherited.removed.isEmpty {
+      Term.say(
+        "没有把这些继承的环境变量交给命令（它们能让子进程加载额外代码）：\(inherited.removed.joined(separator: "、"))",
+        .warn)
+      Term.say("确实需要时加 --pass-env 变量名，它的值会写进授权说明。", .dim)
+    }
     let initiator = Initiator.current()
     let commandText = Term.commandLine(command)
     guard Term.displayWidth(commandText) <= Reason.commandWidth,
@@ -370,7 +395,8 @@ enum Commands {
       + (otpStdinRef.map { ["TOTP stdin=\($0.path)"] } ?? [])
     let reason = try Reason.run(
       injections: injections, command: commandText,
-      directory: FileManager.default.currentDirectoryPath, initiator: initiator)
+      directory: FileManager.default.currentDirectoryPath, keptEnvironment: inherited.kept,
+      initiator: initiator)
     Term.say("等待指纹确认…", .dim)
     let key: SymmetricKey
     do {
@@ -411,7 +437,8 @@ enum Commands {
     let code: Int32
     do {
       code = try Runner.run(
-        argv: command, extraEnvironment: environment, stdinData: stdinData, values: values)
+        argv: command, baseEnvironment: inherited.environment, extraEnvironment: environment,
+        stdinData: stdinData, values: values)
     } catch let error as KagiError {
       useLog().append(
         UseRecord(

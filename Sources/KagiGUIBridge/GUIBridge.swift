@@ -200,10 +200,13 @@ public final class GUIBridge {
     }
   }
   private static func copyToPasteboard(_ value: String) {
+    // 与 CLI 一致：只留在本机（不进通用剪贴板），并标记为隐藏、临时，剪贴板管理器不应记录。
     let write = {
       let board = NSPasteboard.general
-      board.clearContents()
+      board.prepareForNewContents(with: .currentHostOnly)
       board.setString(value, forType: .string)
+      board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+      board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
       let generation = board.changeCount
       _ = ClipboardLease(generation: generation, currentGeneration: { board.changeCount },
         erase: { board.clearContents() })
