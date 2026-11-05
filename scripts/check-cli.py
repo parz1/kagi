@@ -356,6 +356,19 @@ class CLITests(CLIFixture):
         description = result.stderr.decode().split('模拟授权说明：')[-1]
         self.assertIn('NODE_OPTIONS=--require=/tmp/kagi-fake-hook.js', description)
 
+    def test_doctor_reports_environment_without_prompting_or_vault(self):
+        result = self.call('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        for key in ['initiator', 'sandboxed', 'securitySession', 'secureEnclave',
+                    'localAuthentication', 'configured', 'authTimeoutSeconds']:
+            self.assertIn(key, report)
+        self.assertNotIn('prompt', report)
+        self.assertEqual(report['authTimeoutSeconds'], 90)
+        self.assertNotIn('模拟授权说明：'.encode(), result.stderr)
+        self.env['KAGI_AUTH_TIMEOUT'] = '5'
+        self.assertEqual(self.call('doctor').returncode, 64)
+
     def test_invalid_pass_env_never_executes(self):
         self.put('demo/token')
         marker = self.root / 'should-not-exist'

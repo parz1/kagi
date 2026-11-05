@@ -171,6 +171,23 @@ public enum Kagi {
   }
 
   /// 把设备密钥的错误翻译成给人或 agent 看的话。
+  /// 系统验证超时（AUTH-001）：说明可能的原因，并给出下一步。
+  public static func timedOut(
+    _ seconds: Int, nothing: String = "没有交出任何值，命令没有运行。", byAgent: Bool
+  ) -> KagiError {
+    let blockers = Diagnostics.promptBlockers()
+    let cause =
+      blockers.isEmpty
+      ? "如果没有看到验证框，可能是它没能显示出来。"
+      : blockers.joined()
+    let next =
+      byAgent
+      ? "请停下来告诉用户，不要反复重试。可以请用户分别在自己的终端和这里运行 kagi doctor --prompt 对比。"
+      : "运行 kagi doctor --prompt 检查这个环境能否弹出验证框。"
+    return KagiError(
+      .tempFail, "等了 \(seconds) 秒，系统验证没有完成，已取消。\(nothing)", hint: "\(cause)\n\(next)")
+  }
+
   public static func describe(_ failure: KeyFailure, action: Action, byAgent: Bool) -> KagiError {
     let nothing: String
     switch action {
@@ -189,6 +206,8 @@ public enum Kagi {
         .tempFail, "屏幕锁着，弹不出指纹框。\(nothing)", hint: byAgent ? "请等用户回来后再试。" : "解锁屏幕后再试。")
     case .tampered:
       return KagiError(.dataError, "解密失败：库里的文件被改过，或者不属于这台 Mac 的钥匙。\(nothing)")
+    case .timedOut(let seconds):
+      return Kagi.timedOut(seconds, nothing: nothing, byAgent: byAgent)
     case .other(let detail):
       return KagiError(.software, "Secure Enclave 出错：\(detail)")
     }

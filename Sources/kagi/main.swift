@@ -70,6 +70,7 @@ do {
   case "where": try Commands.whereIs(rest)
   case "log": try Commands.log(rest)
   case "guide": Term.print(Texts.guide)
+  case "doctor": exit(try Doctor.run(rest))
   case "repair-index": try Commands.repairIndex(rest)
   case "recover": try Commands.recover(rest)
   case "help", "-h", "--help": Term.print(Texts.help)
