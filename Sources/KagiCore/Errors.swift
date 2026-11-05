@@ -45,6 +45,8 @@ public enum KeyFailure: Error, Equatable {
   case locked
   /// 密文被改过，或者不属于这把钥匙。
   case tampered
+  /// 等了这么多秒系统验证仍未完成，已取消（验证框可能根本没有显示）。
+  case timedOut(Int)
   /// 其他错误，带原始描述。
   case other(String)
 }

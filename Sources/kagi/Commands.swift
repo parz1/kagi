@@ -62,7 +62,23 @@ enum Commands {
         }
       }
     #endif
-    return SecureEnclaveBackend()
+    let seconds = try authTimeout()
+    return SecureEnclaveBackend(promptTimeout: TimeInterval(seconds)) {
+      // 取消验证后系统调用仍然没有返回：不再干等，直接报错退出（AUTH-001）。
+      let error = Kagi.timedOut(seconds, byAgent: Initiator.current().isAgent)
+      Term.say("kagi：\(error.message)", .bad)
+      if let hint = error.hint { Term.say(hint) }
+      exit(error.code.rawValue)
+    }
+  }
+
+  /// 等系统验证的最长秒数。验证框没弹出来时，过了这个时间就报错退出，而不是一直卡住。
+  static func authTimeout() throws -> Int {
+    guard let text = ProcessInfo.processInfo.environment["KAGI_AUTH_TIMEOUT"] else { return 90 }
+    guard let seconds = Int(text), (10...600).contains(seconds) else {
+      throw KagiError(.usage, "KAGI_AUTH_TIMEOUT 要写 10 到 600 之间的秒数。")
+    }
+    return seconds
   }
 
   static func localStore() -> LocalStore {

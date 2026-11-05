@@ -21,7 +21,16 @@ public protocol KeyBackend: Sendable {
 }
 
 public struct SecureEnclaveBackend: KeyBackend {
-  public init() {}
+  /// 等系统验证的最长秒数；nil 表示一直等（GUI 默认）。
+  /// 验证框没弹出来时（AUTH-001），系统调用会一直卡住；超时后取消验证并返回 KeyFailure.timedOut。
+  public let promptTimeout: TimeInterval?
+  /// 取消验证后系统调用仍不返回时调用。CLI 用它报错退出；nil 时继续等。
+  public let onStuck: (@Sendable () -> Void)?
+
+  public init(promptTimeout: TimeInterval? = nil, onStuck: (@Sendable () -> Void)? = nil) {
+    self.promptTimeout = promptTimeout
+    self.onStuck = onStuck
+  }
 
   public var isAvailable: Bool { SecureEnclave.isAvailable }
 
@@ -46,12 +55,20 @@ public struct SecureEnclaveBackend: KeyBackend {
   public func openWithPresence(_ box: HPKEBox, blob: Data, binding: Data, reason: String) throws -> Data {
     let context = LAContext()
     context.localizedReason = reason
-    defer { context.invalidate() }
+    // 调用仍在当前线程同步进行，和以前一样；看门狗只在超时后取消 context。
+    let watchdog = promptTimeout.map {
+      PromptWatchdog(context: context, timeout: $0, onStuck: onStuck)
+    }
+    defer {
+      watchdog?.finish()
+      context.invalidate()
+    }
     do {
       let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
         dataRepresentation: blob, authenticationContext: context)
       return try Crypto.hpkeOpen(box, with: key, binding: binding)
     } catch {
+      if let watchdog, watchdog.fired { throw KeyFailure.timedOut(Int(watchdog.timeout)) }
       throw Self.failure(from: error)
     }
   }
