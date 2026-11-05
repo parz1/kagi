@@ -1,3 +1,4 @@
+import CoreGraphics
 import Darwin
 import Foundation
 import LocalAuthentication
@@ -22,6 +23,39 @@ public enum Diagnostics {
   ) -> [String] {
     ["CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "APP_SANDBOX_CONTAINER_ID"]
       .compactMap { name in environment[name].map { "\(name)=\($0)" } }
+  }
+
+  /// 屏幕现在是否锁着。这个键没有文档但长期稳定；取不到会话信息（如沙箱、无图形会话）时返回 nil。
+  public static func isScreenLocked() -> Bool? {
+    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return nil }
+    return session["CGSSessionScreenIsLocked"] as? Bool ?? false
+  }
+
+  /// launchd 给当前进程的引导命名空间：桌面会话是 Aqua，后台任务是 Background 等。
+  public static func bootstrapManager() -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = ["managername"]
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return nil }
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    let name = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? nil : name
+  }
+
+  /// macOS 认为对当前进程负责的进程名（系统按它判断权限、显示来源）。系统私有接口，取不到时返回 nil。
+  public static func responsibleProcess() -> String? {
+    typealias Get = @convention(c) (pid_t) -> pid_t
+    guard let symbol = dlsym(defaultHandle, "responsibility_get_pid_responsible_for_pid") else {
+      return nil
+    }
+    let pid = unsafeBitCast(symbol, to: Get.self)(getpid())
+    guard pid > 0 else { return nil }
+    return Initiator.executablePath(pid).map { ($0 as NSString).lastPathComponent }
   }
 
   public struct SecuritySession: Equatable, Sendable {
@@ -73,9 +107,12 @@ public enum Diagnostics {
     return (false, error.map { "\($0.domain) \($0.code) \($0.localizedDescription)" } ?? "未知原因")
   }
 
-  /// 超时说明里附加的线索：沙箱或没有图形会话时，验证框多半被拦住了。
+  /// 超时说明里附加的线索：屏幕锁着、在沙箱里或没有图形会话时，验证框多半显示不出来。
   public static func promptBlockers() -> [String] {
     var result: [String] = []
+    if isScreenLocked() == true {
+      result.append("屏幕锁着，验证框显示不出来。")
+    }
     if isSandboxed() == true {
       let hints = sandboxHints()
       result.append(

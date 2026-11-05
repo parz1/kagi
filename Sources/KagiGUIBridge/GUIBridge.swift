@@ -195,7 +195,7 @@ public final class GUIBridge {
       let code = (error as? KagiError)?.code ?? .software
       UseLog(url: local.logURL).append(UseRecord(action: "gui-authorize-" + action, refs: ref.map { [$0] } ?? [],
         command: nil, fullCommand: nil, initiator: initiator,
-        result: code == .denied ? "denied" : code == .tempFail ? "locked" : "error", exitCode: code.rawValue))
+        result: (error as? KagiError)?.auditResult ?? "error", exitCode: code.rawValue))
       throw error
     }
   }

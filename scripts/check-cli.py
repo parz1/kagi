@@ -369,10 +369,43 @@ class CLITests(CLIFixture):
                     'localAuthentication', 'configured', 'authTimeoutSeconds']:
             self.assertIn(key, report)
         self.assertNotIn('prompt', report)
+        self.assertNotIn('keyPrompt', report)
+        for key in ['bootstrapManager', 'responsibleProcess']:
+            self.assertIn(key, report)
         self.assertEqual(report['authTimeoutSeconds'], 90)
         self.assertNotIn('模拟授权说明：'.encode(), result.stderr)
         self.env['KAGI_AUTH_TIMEOUT'] = '5'
         self.assertEqual(self.call('doctor').returncode, 64)
+
+    def test_doctor_in_sandbox_says_blocked_and_never_prompts(self):
+        # 用 seatbelt 拒绝系统验证、Secure Enclave 相关服务，只验证 kagi 的判断和提示。
+        profile = ('(version 1)(allow default)(deny mach-lookup'
+                   ' (global-name "com.apple.CoreAuthentication.agent")'
+                   ' (global-name "com.apple.CoreAuthentication.agent.libxpc")'
+                   ' (global-name "com.apple.ctkd.token-client"))')
+
+        def sandboxed(*args):
+            return subprocess.run(['/usr/bin/sandbox-exec', '-p', profile, KAGI, 'doctor', *args],
+                                  env=self.env, capture_output=True, timeout=20)
+
+        plain = sandboxed('--json')
+        if plain.returncode != 0 and b'sandbox_apply' in plain.stderr:
+            self.skipTest('已经在沙箱里，不能再套一层 sandbox-exec')
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        report = json.loads(plain.stdout)
+        self.assertIs(report['sandboxed'], True)
+        # 系统验证确实被拦住才继续，否则下面的 --prompt 会弹出真实的框。
+        self.assertIs(report['localAuthentication']['ok'], False)
+
+        result = sandboxed('--prompt', '--json')
+        self.assertEqual(result.returncode, 75, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['prompt']['result'], 'blocked')
+        self.assertNotIn('keyPrompt', report)
+
+        text = sandboxed('--prompt').stdout.decode()
+        self.assertIn('被沙箱拦住', text)
+        self.assertIn('在沙箱外运行', text)
 
     def test_invalid_pass_env_never_executes(self):
         self.put('demo/token')

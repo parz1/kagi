@@ -26,6 +26,8 @@ public struct SecureEnclaveBackend: KeyBackend {
   public let promptTimeout: TimeInterval?
   /// 取消验证后系统调用仍不返回时调用。CLI 用它报错退出；nil 时继续等。
   public let onStuck: (@Sendable () -> Void)?
+  /// 屏幕是否锁着。只在测试里替换。
+  var screenIsLocked: @Sendable () -> Bool? = { Diagnostics.isScreenLocked() }
 
   public init(promptTimeout: TimeInterval? = nil, onStuck: (@Sendable () -> Void)? = nil) {
     self.promptTimeout = promptTimeout
@@ -53,6 +55,9 @@ public struct SecureEnclaveBackend: KeyBackend {
   }
 
   public func openWithPresence(_ box: HPKEBox, blob: Data, binding: Data, reason: String) throws -> Data {
+    // 实测锁屏后约 10 秒内系统还接受密钥操作，但验证框显示不出来，不提前判断就会白等到超时。
+    // 这里只会提前拒绝，不会放行：真正的验证仍由密钥操作触发。
+    if screenIsLocked() == true { throw KeyFailure.locked }
     let context = LAContext()
     context.localizedReason = reason
     // 调用仍在当前线程同步进行，和以前一样；看门狗只在超时后取消 context。
@@ -87,8 +92,10 @@ public struct SecureEnclaveBackend: KeyBackend {
     }
   }
 
-  /// 把系统给的各种错误归成几类。实测：点取消是 LocalAuthentication -2；锁屏时是 -25308。
-  static func failure(from error: Error) -> KeyFailure {
+  /// 把系统给的各种错误归成几类。实测：点取消是 LocalAuthentication -2；锁屏时是 -25308；
+  /// seatbelt 拒绝连接 coreauthd 和 ctkd 时是 NSCocoaErrorDomain 4099。
+  /// 在沙箱里遇到认不出的错误时按「被拦住」处理：原始描述保留在错误里，不会掩盖真实原因。
+  static func failure(from error: Error, sandboxed: Bool? = Diagnostics.isSandboxed()) -> KeyFailure {
     if let failure = error as? KeyFailure { return failure }
     if let crypto = error as? CryptoKitError, case .authenticationFailure = crypto { return .tampered }
     let ns = error as NSError
@@ -106,7 +113,8 @@ public struct SecureEnclaveBackend: KeyBackend {
     case (_, Int(errSecInteractionNotAllowed)):
       return .locked
     default:
-      return .other("\(ns.domain) \(ns.code) \(ns.localizedDescription)")
+      let detail = "\(ns.domain) \(ns.code) \(ns.localizedDescription)"
+      return sandboxed == true ? .blocked(detail) : .other(detail)
     }
   }
 }

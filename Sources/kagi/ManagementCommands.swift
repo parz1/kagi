@@ -29,7 +29,7 @@ extension Commands {
         UseRecord(
           action: action, refs: refs, command: nil, fullCommand: nil,
           initiator: initiator,
-          result: code == .denied ? "denied" : code == .tempFail ? "locked" : "error",
+          result: (error as? KagiError)?.auditResult ?? "error",
           exitCode: code.rawValue))
       throw error
     }

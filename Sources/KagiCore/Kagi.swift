@@ -115,6 +115,9 @@ public enum Kagi {
     backend: KeyBackend, reason: String
   ) throws -> (DeviceFile, DeviceState) {
     guard backend.isAvailable else {
+      if Diagnostics.isSandboxed() == true {
+        throw describe(.blocked("Secure Enclave 不可用"), action: .enroll, byAgent: false)
+      }
       throw KagiError(.config, "这台 Mac 没有 Secure Enclave，kagi 用不了。")
     }
     let deviceID = "mac-" + Base32.encode(Crypto.randomBytes(5)).lowercased()
@@ -178,14 +181,15 @@ public enum Kagi {
     let blockers = Diagnostics.promptBlockers()
     let cause =
       blockers.isEmpty
-      ? "如果没有看到验证框，可能是它没能显示出来。"
+      ? "验证框可能没被注意到，也可能没能显示出来。"
       : blockers.joined()
     let next =
       byAgent
       ? "请停下来告诉用户，不要反复重试。可以请用户分别在自己的终端和这里运行 kagi doctor --prompt 对比。"
       : "运行 kagi doctor --prompt 检查这个环境能否弹出验证框。"
     return KagiError(
-      .tempFail, "等了 \(seconds) 秒，系统验证没有完成，已取消。\(nothing)", hint: "\(cause)\n\(next)")
+      .tempFail, "等了 \(seconds) 秒，系统验证没有完成，已取消。\(nothing)", hint: "\(cause)\n\(next)",
+      audit: "timedOut")
   }
 
   public static func describe(_ failure: KeyFailure, action: Action, byAgent: Bool) -> KagiError {
@@ -208,6 +212,11 @@ public enum Kagi {
       return KagiError(.dataError, "解密失败：库里的文件被改过，或者不属于这台 Mac 的钥匙。\(nothing)")
     case .timedOut(let seconds):
       return Kagi.timedOut(seconds, nothing: nothing, byAgent: byAgent)
+    case .blocked(let detail):
+      return KagiError(
+        .tempFail, "kagi 运行在沙箱里，连不上系统验证和 Secure Enclave，验证框弹不出来。\(nothing)",
+        hint: "重试没有用。需要由用户决定是否在 agent 的设置里允许 kagi 在沙箱外运行，运行 kagi doctor 查看说明；不要设法绕开系统验证。\n系统返回：\(detail)",
+        audit: "blocked")
     case .other(let detail):
       return KagiError(.software, "Secure Enclave 出错：\(detail)")
     }
