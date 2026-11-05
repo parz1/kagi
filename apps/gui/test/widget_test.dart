@@ -27,12 +27,12 @@ void main() {
     (tester) async {
       await mount(tester);
       expect(find.byKey(const Key('key-table')), findsOneWidget);
-      expect(tester.getSize(find.byKey(const Key('vault-sidebar'))).width, 172);
+      expect(tester.getSize(find.byKey(const Key('vault-sidebar'))).width, 232);
       expect(
         tester
             .getSize(find.byKey(const Key('item-google/authenticator')))
             .height,
-        42,
+        56,
       );
       expect(find.text('所有条目'), findsNWidgets(2));
       await tester.tap(find.byKey(const Key('item-google/authenticator')));
@@ -156,7 +156,7 @@ void main() {
   ) async {
     await mount(tester, client: LimitedClient());
     expect(
-      tester.widget<IconButton>(find.byKey(const Key('add-key'))).onPressed,
+      tester.widget<FilledButton>(find.byKey(const Key('add-key'))).onPressed,
       isNull,
     );
     expect(
@@ -192,8 +192,6 @@ void main() {
   });
   testWidgets('type filter shows actual TOTP rows only', (tester) async {
     await mount(tester);
-    await tester.tap(find.byTooltip('筛选凭据类型'));
-    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('kind-totp')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('item-google/authenticator')), findsOneWidget);
@@ -239,6 +237,18 @@ void main() {
     );
     expect(route!.transitionDuration, Duration.zero);
     expect(tester.takeException(), isNull);
+  });
+  testWidgets('dark appearance follows the system without overflow', (
+    tester,
+  ) async {
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    for (final size in [const Size(1280, 820), const Size(390, 844)]) {
+      await mount(tester, size: size);
+      final context = tester.element(find.byKey(const Key('search')));
+      expect(Theme.of(context).brightness, Brightness.dark);
+      expect(tester.takeException(), isNull);
+    }
   });
   testWidgets('compact Space control can create a named space', (tester) async {
     await mount(tester);
